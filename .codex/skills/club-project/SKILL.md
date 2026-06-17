@@ -14,6 +14,21 @@ description: Club 阅卷与学情平台项目约定。Use when working in the cl
 - Prioritize Go for the main backend API and Python for OCR/AI worker services.
 - Keep Android configured first for the mobile student/guardian surface.
 
+## Local Dependency Mirrors
+
+- For Go local debugging, dependency installation, tests, and runs, set `GOPROXY=https://goproxy.cn,direct` on the command unless the user explicitly asks otherwise. Example: `GOPROXY=https://goproxy.cn,direct go test ./...`.
+- Before installing Python packages with pip, configure Douban PyPI mirror:
+  - `pip config set global.index-url http://pypi.douban.com/simple/`
+  - `pip config set global.trusted-host pypi.douban.com`
+- Do not print or commit secrets from `.env.local`.
+
+## Local Port Listening
+
+- The user wants this project to keep allowing local sandbox port listening for development and preview.
+- When starting project-local servers such as Go API, Vite Web, Python AI Worker, Metro, or Android dev tooling, request sandbox escalation directly if normal sandbox execution cannot bind the port.
+- Prefer persistent, narrowly scoped `prefix_rule` values for recurring server commands, for example `["npm", "run", "dev"]`.
+- Do not repeatedly ask explanatory follow-up questions before requesting the needed port-listening approval.
+
 ## Repository Update Trigger
 
 When the user says `更新仓库`:
@@ -32,4 +47,3 @@ Do not commit unrelated user changes unless they are required for the requested 
 - Web teacher dashboard uses the “阅卷工作台型” concept.
 - The dashboard must include subjective-question grading as a core workflow.
 - Subjective grading uses left/right split view: standard answer and scoring rules on the left, student paper/OCR answer and AI score suggestion on the right, with teacher final score controls.
-

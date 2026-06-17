@@ -3,7 +3,53 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+
+def load_dotenv(name: str = ".env.local") -> None:
+    current = Path.cwd()
+    for directory in [current, *current.parents]:
+        candidate = directory / name
+        if not candidate.exists():
+            continue
+        for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+        return
+
+
+def public_config() -> dict[str, Any]:
+    return {
+        "appEnv": os.getenv("APP_ENV", "development"),
+        "port": int(os.getenv("AI_WORKER_PORT", "8090")),
+        "storageDriver": os.getenv("STORAGE_DRIVER", "minio"),
+        "mysql": {
+            "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+            "port": os.getenv("MYSQL_PORT", "3306"),
+            "user": os.getenv("MYSQL_USER", "root"),
+            "database": os.getenv("MYSQL_DATABASE", "club"),
+            "passwordProvided": bool(os.getenv("MYSQL_PASSWORD")),
+        },
+        "redis": {
+            "addr": os.getenv("REDIS_ADDR", "127.0.0.1:6379"),
+            "db": int(os.getenv("REDIS_DB", "0")),
+            "passwordProvided": bool(os.getenv("REDIS_PASSWORD")),
+        },
+        "obs": {
+            "endpoint": os.getenv("OBS_ENDPOINT", ""),
+            "bucket": os.getenv("OBS_BUCKET", ""),
+            "region": os.getenv("OBS_REGION", ""),
+            "accessKeyProvided": bool(os.getenv("OBS_ACCESS_KEY_ID")),
+            "secretProvided": bool(os.getenv("OBS_SECRET_ACCESS_KEY")),
+        },
+    }
 
 
 def analyze_paper(payload: dict[str, Any]) -> dict[str, Any]:
@@ -52,7 +98,7 @@ def detect_wrong_reason(payload: dict[str, Any]) -> dict[str, Any]:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
-            self.write_json(200, {"status": "ok"})
+            self.write_json(200, {"status": "ok", "config": public_config()})
             return
         self.write_json(404, {"error": "not found"})
 
@@ -89,6 +135,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    load_dotenv()
     port = int(os.getenv("AI_WORKER_PORT", "8090"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"ai worker listening on http://localhost:{port}")
@@ -97,4 +144,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

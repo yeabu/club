@@ -1,0 +1,238 @@
+package app
+
+var schemaStatements = []string{
+	`CREATE TABLE IF NOT EXISTS schools (
+		id VARCHAR(40) PRIMARY KEY,
+		name VARCHAR(100) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS classes (
+		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		grade VARCHAR(40) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_classes_school (school_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS students (
+		id VARCHAR(40) PRIMARY KEY,
+		class_id VARCHAR(40) NOT NULL,
+		name VARCHAR(80) NOT NULL,
+		guardian_name VARCHAR(80) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_students_class (class_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS teachers (
+		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) NOT NULL,
+		name VARCHAR(80) NOT NULL,
+		subject VARCHAR(40) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_teachers_school (school_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS knowledge_points (
+		id VARCHAR(40) PRIMARY KEY,
+		name VARCHAR(100) NOT NULL,
+		subject VARCHAR(40) NOT NULL,
+		parent_id VARCHAR(40) NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_knowledge_name_subject (name, subject)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS paper_templates (
+		id VARCHAR(40) PRIMARY KEY,
+		name VARCHAR(120) NOT NULL,
+		subject VARCHAR(40) NOT NULL,
+		grade VARCHAR(40) NOT NULL,
+		question_count INT NOT NULL,
+		total_score INT NOT NULL,
+		source_file_url VARCHAR(255) DEFAULT '',
+		status VARCHAR(30) NOT NULL DEFAULT 'ready',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS question_templates (
+		id VARCHAR(40) PRIMARY KEY,
+		template_id VARCHAR(40) NOT NULL,
+		question_no VARCHAR(20) NOT NULL,
+		question_type VARCHAR(40) NOT NULL,
+		score DECIMAL(6,2) NOT NULL,
+		standard_answer TEXT,
+		knowledge_json JSON NOT NULL,
+		page_no INT NOT NULL,
+		x INT NOT NULL,
+		y INT NOT NULL,
+		width INT NOT NULL,
+		height INT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		INDEX idx_question_template (template_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS assignments (
+		id VARCHAR(40) PRIMARY KEY,
+		title VARCHAR(120) NOT NULL,
+		class_name VARCHAR(100) NOT NULL,
+		template_id VARCHAR(40) NULL,
+		due_at DATETIME NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'open',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_assignments_class (class_name)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS scan_jobs (
+		id VARCHAR(40) PRIMARY KEY,
+		title VARCHAR(120) NOT NULL,
+		class_name VARCHAR(100) NOT NULL,
+		pages INT NOT NULL,
+		status VARCHAR(60) NOT NULL,
+		progress INT NOT NULL DEFAULT 0,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS submissions (
+		id VARCHAR(40) PRIMARY KEY,
+		assignment_id VARCHAR(40) NOT NULL,
+		student_id VARCHAR(40) NOT NULL,
+		file_url VARCHAR(255) NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'uploaded',
+		submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_submissions_assignment (assignment_id),
+		INDEX idx_submissions_student (student_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS subjective_reviews (
+		id VARCHAR(40) PRIMARY KEY,
+		submission_id VARCHAR(40) NOT NULL,
+		question_id VARCHAR(40) NOT NULL,
+		paper_name VARCHAR(120) NOT NULL,
+		student_name VARCHAR(80) NOT NULL,
+		class_name VARCHAR(100) NOT NULL,
+		question_no VARCHAR(20) NOT NULL,
+		full_score DECIMAL(6,2) NOT NULL,
+		standard_answer TEXT NOT NULL,
+		scoring_rules_json JSON NOT NULL,
+		knowledge_json JSON NOT NULL,
+		student_ocr_text TEXT NOT NULL,
+		student_image_url VARCHAR(255) DEFAULT '',
+		ai_score DECIMAL(6,2) NOT NULL,
+		ai_reason TEXT NOT NULL,
+		ai_comments_json JSON NOT NULL,
+		confidence INT NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_review_submission_question (submission_id, question_id),
+		INDEX idx_subjective_reviews_status (status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS grading_decisions (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		submission_id VARCHAR(40) NOT NULL,
+		question_id VARCHAR(40) NOT NULL,
+		final_score DECIMAL(6,2) NOT NULL,
+		decision VARCHAR(40) NOT NULL,
+		teacher_note TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_decision_submission_question (submission_id, question_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS wrong_questions (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		student_id VARCHAR(40) NOT NULL,
+		question_id VARCHAR(40) NOT NULL,
+		knowledge_point VARCHAR(100) NOT NULL,
+		wrong_reason VARCHAR(255) NOT NULL,
+		source_paper VARCHAR(120) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_wrong_student (student_id),
+		INDEX idx_wrong_knowledge (knowledge_point)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS exam_scores (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		student_name VARCHAR(80) NOT NULL,
+		class_name VARCHAR(100) NOT NULL,
+		paper_name VARCHAR(120) NOT NULL,
+		score DECIMAL(6,2) NOT NULL,
+		exam_at DATE NOT NULL,
+		INDEX idx_exam_scores_class (class_name)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS question_stats (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		paper_name VARCHAR(120) NOT NULL,
+		question_no VARCHAR(20) NOT NULL,
+		question_type VARCHAR(40) NOT NULL,
+		accuracy INT NOT NULL,
+		UNIQUE KEY uk_question_stats (paper_name, question_no)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS knowledge_stats (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(100) NOT NULL,
+		accuracy INT NOT NULL,
+		wrong_count INT NOT NULL,
+		UNIQUE KEY uk_knowledge_stats_name (name)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS student_risks (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		student_name VARCHAR(80) NOT NULL,
+		risk VARCHAR(255) NOT NULL,
+		weakness_json JSON NOT NULL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS homework_watch (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		student_name VARCHAR(80) NOT NULL,
+		class_name VARCHAR(100) NOT NULL,
+		missing INT NOT NULL,
+		guardian VARCHAR(80) NOT NULL,
+		UNIQUE KEY uk_homework_watch_student (student_name, class_name)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+}
+
+var seedStatements = []string{
+	`INSERT IGNORE INTO schools (id, name) VALUES ('school_001', '示范学校')`,
+	`INSERT IGNORE INTO classes (id, school_id, name, grade) VALUES ('class_603', 'school_001', '六年级 3 班', '六年级')`,
+	`INSERT IGNORE INTO teachers (id, school_id, name, subject) VALUES ('teacher_001', 'school_001', '陈老师', '数学')`,
+	`INSERT IGNORE INTO students (id, class_id, name, guardian_name) VALUES
+		('stu_001', 'class_603', '张三', '张三家长'),
+		('stu_002', 'class_603', '李四', '李四家长'),
+		('stu_003', 'class_603', '赵六', '赵六家长')`,
+	`INSERT IGNORE INTO knowledge_points (id, name, subject) VALUES
+		('kp_001', '分数应用题', '数学'),
+		('kp_002', '几何面积', '数学'),
+		('kp_003', '比例换算', '数学')`,
+	`INSERT IGNORE INTO paper_templates (id, name, subject, grade, question_count, total_score, status) VALUES
+		('tpl_001', '六年级数学期中卷', '数学', '六年级', 25, 100, 'ready')`,
+	`INSERT IGNORE INTO question_templates (id, template_id, question_no, question_type, score, standard_answer, knowledge_json, page_no, x, y, width, height) VALUES
+		('q_001', 'tpl_001', '1', 'single_choice', 2, 'A', JSON_ARRAY('分数'), 1, 120, 260, 480, 80),
+		('q_015', 'tpl_001', '15', 'subjective', 10, '先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。答：需要 24 千克。', JSON_ARRAY('比例', '应用题建模'), 2, 96, 420, 620, 180),
+		('q_018', 'tpl_001', '18', 'subjective', 8, '根据面积公式拆分图形并计算。', JSON_ARRAY('几何面积'), 2, 110, 640, 600, 160)`,
+	`INSERT IGNORE INTO assignments (id, title, class_name, template_id, due_at, status) VALUES
+		('assign_001', '六年级数学期中卷', '六年级 3 班', 'tpl_001', NOW() + INTERVAL 1 DAY, 'open')`,
+	`INSERT IGNORE INTO scan_jobs (id, title, class_name, pages, status, progress) VALUES
+		('scan_001', '六年级数学期中卷', '六年级 3 班', 96, 'OCR 识别中', 68),
+		('scan_002', '分数应用题专项', '六年级 1 班', 42, '等待 OMR', 32),
+		('scan_003', '几何面积小测', '五年级 2 班', 48, '待导入', 0)`,
+	`INSERT IGNORE INTO submissions (id, assignment_id, student_id, file_url, status) VALUES
+		('sub_001', 'assign_001', 'stu_001', '/mock/student-answer-q15.png', 'graded'),
+		('sub_002', 'assign_001', 'stu_002', '/mock/student-answer-q18.png', 'uploaded')`,
+	`INSERT IGNORE INTO subjective_reviews (id, submission_id, question_id, paper_name, student_name, class_name, question_no, full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text, student_image_url, ai_score, ai_reason, ai_comments_json, confidence, status) VALUES
+		('review_001', 'sub_001', 'q_015', '六年级数学期中卷', '张三', '六年级 3 班', '15', 10, '先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。答：需要 24 千克。', JSON_ARRAY('正确设未知数 2 分', '列出比例关系 4 分', '计算过程正确 2 分', '结果与答语完整 2 分'), JSON_ARRAY('比例', '应用题建模', '方程求解'), '设需要 x 千克，3/5 = x/40，5x = 120，x = 24。答需要 24 千克。', '/mock/student-answer-q15.png', 8, '建模和计算结果正确，但比例式书写不够规范，缺少单位换算说明。', JSON_ARRAY('核心步骤完整', '建议扣除书写规范 1 分', '答语完整，可保留 1 分'), 86, 'pending'),
+		('review_002', 'sub_002', 'q_018', '六年级数学期中卷', '李四', '六年级 3 班', '18', 8, '根据面积公式拆分图形并计算。', JSON_ARRAY('图形拆分正确 3 分', '公式使用正确 3 分', '计算结果正确 2 分'), JSON_ARRAY('几何面积'), '把图形看成长方形和三角形，长方形面积 36，三角形面积 12，总面积 48。', '/mock/student-answer-q18.png', 6, '思路基本正确，但少写一个关键单位，图形拆分说明不完整。', JSON_ARRAY('公式基本正确', '拆分依据需要补充', '建议教师复核单位'), 78, 'pending')`,
+	`INSERT IGNORE INTO exam_scores (student_name, class_name, paper_name, score, exam_at) VALUES
+		('张三', '六年级 3 班', '六年级数学期中卷', 85, '2026-06-01'),
+		('李四', '六年级 3 班', '六年级数学期中卷', 72, '2026-06-01'),
+		('赵六', '六年级 3 班', '六年级数学期中卷', 88, '2026-06-01'),
+		('王五', '六年级 3 班', '六年级数学期中卷', 82, '2026-06-01')`,
+	`INSERT IGNORE INTO question_stats (paper_name, question_no, question_type, accuracy) VALUES
+		('六年级数学期中卷', '1', '单选题', 96),
+		('六年级数学期中卷', '8', '填空题', 82),
+		('六年级数学期中卷', '15', '应用题', 42),
+		('六年级数学期中卷', '18', '应用题', 38)`,
+	`INSERT IGNORE INTO knowledge_stats (name, accuracy, wrong_count) VALUES
+		('分数应用题', 42, 29),
+		('几何面积', 51, 21),
+		('比例换算', 64, 15),
+		('计算基础', 88, 6)`,
+	`INSERT IGNORE INTO student_risks (student_name, risk, weakness_json) VALUES
+		('李四', '连续 3 次未提交作业', JSON_ARRAY('分数应用题', '比例')),
+		('赵六', '本次低于班均 18 分', JSON_ARRAY('几何面积'))`,
+	`INSERT IGNORE INTO homework_watch (student_name, class_name, missing, guardian) VALUES
+		('李四', '六年级 3 班', 3, '李四家长'),
+		('赵六', '六年级 3 班', 2, '赵六家长')`,
+}
