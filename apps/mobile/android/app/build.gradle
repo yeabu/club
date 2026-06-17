@@ -1,0 +1,22 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "com.facebook.react"
+}
+
+react {
+    autolinkLibrariesWithApp()
+}
+
+android {
+    namespace "com.clubmobile"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.clubmobile"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+}

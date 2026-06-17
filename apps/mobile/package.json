@@ -1,0 +1,23 @@
+{
+  "name": "@club/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "lint": "echo \"lint not configured yet\""
+  },
+  "dependencies": {
+    "@react-native/new-app-screen": "latest",
+    "react": "^19.0.0",
+    "react-native": "^0.78.0"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "latest",
+    "@react-native-community/cli-platform-android": "latest",
+    "@react-native/babel-preset": "latest",
+    "@react-native/metro-config": "latest",
+    "typescript": "^5.7.2"
+  }
+}
+
