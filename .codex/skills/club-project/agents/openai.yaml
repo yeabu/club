@@ -1,0 +1,6 @@
+interface:
+  display_name: "Club Project"
+  short_description: "Club 项目约定、实现方向和仓库更新流程"
+  default_prompt: "Use $club-project to follow the Club project conventions."
+policy:
+  allow_implicit_invocation: true

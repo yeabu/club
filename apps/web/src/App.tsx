@@ -347,7 +347,7 @@ function App() {
                   <input
                     max={subjective.fullScore}
                     min={0}
-                    onChange={(event) => setScore(Number(event.target.value))}
+                    onChange={(event: { target: { value: string } }) => setScore(Number(event.target.value))}
                     step={0.5}
                     type="number"
                     value={score}
@@ -355,7 +355,7 @@ function App() {
                 </label>
                 <label>
                   批注
-                  <textarea onChange={(event) => setNote(event.target.value)} value={note} />
+                  <textarea onChange={(event: { target: { value: string } }) => setNote(event.target.value)} value={note} />
                 </label>
                 <div className="decision-actions">
                   <button className="primary-button" onClick={() => saveDecision("accepted_ai")}><Check size={18} />接受 AI</button>
@@ -423,4 +423,3 @@ function App() {
 }
 
 export default App;
-

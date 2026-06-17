@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+build/
+.gradle/
+android/.gradle/
+*.log
+__pycache__/
+*.pyc
+.env
+.env.local
+
