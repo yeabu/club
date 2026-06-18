@@ -150,6 +150,7 @@ var schemaStatements = []string{
 		paper_name VARCHAR(120) NOT NULL,
 		score DECIMAL(6,2) NOT NULL,
 		exam_at DATE NOT NULL,
+		UNIQUE KEY uk_exam_scores_seed (student_name, class_name, paper_name, exam_at),
 		INDEX idx_exam_scores_class (class_name)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS question_stats (
@@ -172,7 +173,8 @@ var schemaStatements = []string{
 		student_name VARCHAR(80) NOT NULL,
 		risk VARCHAR(255) NOT NULL,
 		weakness_json JSON NOT NULL,
-		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_student_risks_student_risk (student_name, risk)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS homework_watch (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,

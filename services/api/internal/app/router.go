@@ -33,10 +33,12 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("GET /health", app.handleHealth)
 	mux.HandleFunc("GET /api/dashboard", app.handleDashboard)
 	mux.HandleFunc("GET /api/grading/subjective/current", app.handleCurrentSubjective)
+	mux.HandleFunc("GET /api/grading/subjective/reviews/{reviewID}", app.handleReviewSubjective)
 	mux.HandleFunc("POST /api/grading/subjective/decision", app.handleSubjectiveDecision)
 	mux.HandleFunc("GET /api/templates", app.handleTemplates)
 	mux.HandleFunc("GET /api/analytics/classroom", app.handleClassroomAnalytics)
 	mux.HandleFunc("GET /api/dev/connections", app.handleDevConnections)
+	mux.HandleFunc("POST /api/dev/reset-demo", app.handleResetDemo)
 
 	return withCORS(mux)
 }
@@ -68,9 +70,32 @@ func (app *App) handleCurrentSubjective(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusOK, data)
 			return
 		}
-		if err != sql.ErrNoRows {
-			log.Printf("current subjective db query failed: %v", err)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pending subjective reviews"})
+			return
 		}
+		log.Printf("current subjective db query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, subjectiveFixture())
+}
+
+func (app *App) handleReviewSubjective(w http.ResponseWriter, r *http.Request) {
+	reviewID := r.PathValue("reviewID")
+	if reviewID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reviewID is required"})
+		return
+	}
+	if app.store != nil {
+		data, err := app.store.SubjectiveByReviewID(r.Context(), reviewID)
+		if err == nil {
+			writeJSON(w, http.StatusOK, data)
+			return
+		}
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "subjective review not found"})
+			return
+		}
+		log.Printf("subjective review db query failed: %v", err)
 	}
 	writeJSON(w, http.StatusOK, subjectiveFixture())
 }
@@ -126,6 +151,24 @@ func (app *App) handleClassroomAnalytics(w http.ResponseWriter, r *http.Request)
 
 func (app *App) handleDevConnections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CheckDevConnections(app.config))
+}
+
+func (app *App) handleResetDemo(w http.ResponseWriter, r *http.Request) {
+	if app.config.AppEnv == "production" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "reset demo is disabled in production"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, dashboardFixture())
+		return
+	}
+	data, err := app.store.ResetDemo(r.Context())
+	if err != nil {
+		log.Printf("reset demo failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reset demo failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 func withCORS(next http.Handler) http.Handler {

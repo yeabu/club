@@ -97,6 +97,7 @@ cp .env.example .env.local
 - Python AI Worker：读取 `AI_WORKER_PORT`、`MYSQL_*`、`REDIS_*`、`OBS_*`。
 - `/health` 只返回脱敏后的配置状态，例如地址、库名、是否提供密钥，不返回密码或 Secret。
 - `GET /api/dev/connections` 用当前开发配置检查 MySQL、Redis、OBS/MinIO 连通性，仅返回连接状态和延迟，不返回密钥。
+- `POST /api/dev/reset-demo` 仅开发环境可用，重置演示主观题复核队列和裁定记录，便于本地调试保存流。
 
 ### 依赖镜像
 

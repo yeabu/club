@@ -32,6 +32,7 @@ func dashboardFixture() DashboardResponse {
 
 func subjectiveFixture() SubjectiveGradingResponse {
 	return SubjectiveGradingResponse{
+		ReviewID:     "review_001",
 		SubmissionID: "sub_001",
 		QuestionID:   "q_015",
 		PaperName:    "六年级数学期中卷",

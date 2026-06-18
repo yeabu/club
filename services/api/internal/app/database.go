@@ -89,6 +89,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.ensureSeedConstraints(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -242,7 +245,29 @@ func (s *Store) ClassAverageScore(ctx context.Context) (float64, error) {
 }
 
 func (s *Store) CurrentSubjective(ctx context.Context) (SubjectiveGradingResponse, error) {
+	return s.subjectiveByQuery(ctx, `
+		SELECT id, submission_id, question_id, paper_name, student_name, class_name, question_no,
+			full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text,
+			student_image_url, ai_score, ai_reason, ai_comments_json, confidence
+		FROM subjective_reviews
+		WHERE status = 'pending'
+		ORDER BY updated_at DESC
+		LIMIT 1`)
+}
+
+func (s *Store) SubjectiveByReviewID(ctx context.Context, reviewID string) (SubjectiveGradingResponse, error) {
+	return s.subjectiveByQuery(ctx, `
+		SELECT id, submission_id, question_id, paper_name, student_name, class_name, question_no,
+			full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text,
+			student_image_url, ai_score, ai_reason, ai_comments_json, confidence
+		FROM subjective_reviews
+		WHERE id = ?
+		LIMIT 1`, reviewID)
+}
+
+func (s *Store) subjectiveByQuery(ctx context.Context, query string, args ...any) (SubjectiveGradingResponse, error) {
 	var row struct {
+		ReviewID      string
 		SubmissionID  string
 		QuestionID    string
 		PaperName     string
@@ -261,15 +286,8 @@ func (s *Store) CurrentSubjective(ctx context.Context) (SubjectiveGradingRespons
 		Confidence    int
 	}
 
-	err := s.db.QueryRowContext(ctx, `
-		SELECT submission_id, question_id, paper_name, student_name, class_name, question_no,
-			full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text,
-			student_image_url, ai_score, ai_reason, ai_comments_json, confidence
-		FROM subjective_reviews
-		WHERE status = 'pending'
-		ORDER BY updated_at DESC
-		LIMIT 1`).Scan(
-		&row.SubmissionID, &row.QuestionID, &row.PaperName, &row.StudentName, &row.ClassName, &row.QuestionNo,
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+		&row.ReviewID, &row.SubmissionID, &row.QuestionID, &row.PaperName, &row.StudentName, &row.ClassName, &row.QuestionNo,
 		&row.FullScore, &row.Standard, &row.RulesJSON, &row.KnowledgeJSON, &row.OCRText,
 		&row.ImageURL, &row.AIScore, &row.AIReason, &row.AIComments, &row.Confidence,
 	)
@@ -283,6 +301,7 @@ func (s *Store) CurrentSubjective(ctx context.Context) (SubjectiveGradingRespons
 	decodeStringSlice(row.AIComments, &comments)
 
 	return SubjectiveGradingResponse{
+		ReviewID:     row.ReviewID,
 		SubmissionID: row.SubmissionID,
 		QuestionID:   row.QuestionID,
 		PaperName:    row.PaperName,
@@ -321,13 +340,41 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 	_, _ = s.db.ExecContext(ctx, "UPDATE subjective_reviews SET status = 'reviewed', updated_at = CURRENT_TIMESTAMP WHERE submission_id = ? AND question_id = ?", req.SubmissionID, req.QuestionID)
 
 	nextQuestion := ""
-	_ = s.db.QueryRowContext(ctx, "SELECT question_id FROM subjective_reviews WHERE status = 'pending' ORDER BY updated_at DESC LIMIT 1").Scan(&nextQuestion)
+	nextReview, err := s.CurrentSubjective(ctx)
+	if err == nil {
+		nextQuestion = nextReview.QuestionID
+	} else if err != sql.ErrNoRows {
+		return GradingDecisionResponse{}, err
+	}
 
-	return GradingDecisionResponse{
+	response := GradingDecisionResponse{
 		Status:       "saved",
 		FinalScore:   req.FinalScore,
 		NextQuestion: nextQuestion,
-	}, nil
+	}
+	if err == nil {
+		response.NextReview = &nextReview
+	}
+	return response, nil
+}
+
+func (s *Store) ResetDemo(ctx context.Context) (DashboardResponse, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return DashboardResponse{}, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM grading_decisions WHERE submission_id IN ('sub_001', 'sub_002')"); err != nil {
+		return DashboardResponse{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE subjective_reviews SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id IN ('review_001', 'review_002')"); err != nil {
+		return DashboardResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DashboardResponse{}, err
+	}
+	return s.Dashboard(ctx)
 }
 
 func (s *Store) Templates(ctx context.Context) ([]PaperTemplate, error) {
@@ -438,4 +485,70 @@ func decodeStringSlice(raw string, target *[]string) {
 	if err := json.Unmarshal([]byte(raw), target); err != nil {
 		log.Printf("failed to decode json slice: %v", err)
 	}
+}
+
+func (s *Store) ensureSeedConstraints(ctx context.Context) error {
+	cleanupStatements := []string{
+		`DELETE later FROM exam_scores later
+			JOIN exam_scores earlier
+				ON later.student_name = earlier.student_name
+				AND later.class_name = earlier.class_name
+				AND later.paper_name = earlier.paper_name
+				AND later.exam_at = earlier.exam_at
+				AND later.id > earlier.id`,
+		`DELETE later FROM student_risks later
+			JOIN student_risks earlier
+				ON later.student_name = earlier.student_name
+				AND later.risk = earlier.risk
+				AND later.id > earlier.id`,
+	}
+	for _, stmt := range cleanupStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+
+	indexes := []struct {
+		table string
+		name  string
+		stmt  string
+	}{
+		{
+			table: "exam_scores",
+			name:  "uk_exam_scores_seed",
+			stmt:  "ALTER TABLE exam_scores ADD UNIQUE KEY uk_exam_scores_seed (student_name, class_name, paper_name, exam_at)",
+		},
+		{
+			table: "student_risks",
+			name:  "uk_student_risks_student_risk",
+			stmt:  "ALTER TABLE student_risks ADD UNIQUE KEY uk_student_risks_student_risk (student_name, risk)",
+		},
+	}
+	for _, index := range indexes {
+		exists, err := s.indexExists(ctx, index.table, index.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, index.stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) indexExists(ctx context.Context, tableName string, indexName string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.statistics
+		WHERE table_schema = DATABASE()
+			AND table_name = ?
+			AND index_name = ?`, tableName, indexName).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

@@ -47,6 +47,7 @@ type HomeworkWatch struct {
 }
 
 type SubjectiveGradingResponse struct {
+	ReviewID       string         `json:"reviewId"`
 	SubmissionID   string         `json:"submissionId"`
 	QuestionID     string         `json:"questionId"`
 	PaperName      string         `json:"paperName"`
@@ -86,9 +87,10 @@ type GradingDecisionRequest struct {
 }
 
 type GradingDecisionResponse struct {
-	Status       string  `json:"status"`
-	FinalScore   float64 `json:"finalScore"`
-	NextQuestion string  `json:"nextQuestion"`
+	Status       string                     `json:"status"`
+	FinalScore   float64                    `json:"finalScore"`
+	NextQuestion string                     `json:"nextQuestion"`
+	NextReview   *SubjectiveGradingResponse `json:"nextReview,omitempty"`
 }
 
 type PaperTemplate struct {
