@@ -1677,6 +1677,37 @@ button.metric:hover {
   padding: 10px 12px;
 }
 
+.objective-config-panel {
+  background: #ffffff;
+  border: 1px solid #d8e1ec;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.objective-config-panel strong,
+.objective-config-panel span {
+  display: block;
+}
+
+.objective-config-panel strong {
+  color: #17202a;
+  font-size: 14px;
+}
+
+.objective-config-panel span {
+  color: #667085;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.answer-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .region-style-editor label,
 .question-config-editor label {
   color: #405164;
@@ -1754,6 +1785,106 @@ button.metric:hover {
   margin-top: 6px;
 }
 
+.analytics-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.score-band-list,
+.exception-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.score-band-row {
+  align-items: center;
+  border-top: 1px solid #edf1f6;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 90px 1fr 72px;
+  padding-top: 12px;
+}
+
+.score-band-row span,
+.score-band-row strong {
+  color: #405164;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.score-band-row strong {
+  color: #17202a;
+  text-align: right;
+}
+
+.analytics-table-wrap {
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  margin-top: 18px;
+  overflow-x: auto;
+}
+
+.analytics-section-title {
+  color: #17202a;
+  font-size: 15px;
+  margin: 18px 0 0;
+}
+
+.analytics-table {
+  border-collapse: collapse;
+  min-width: 640px;
+  width: 100%;
+}
+
+.analytics-table th,
+.analytics-table td {
+  border-bottom: 1px solid #edf1f6;
+  color: #405164;
+  font-size: 13px;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.analytics-table th {
+  background: #f7fafc;
+  color: #17202a;
+  font-weight: 800;
+}
+
+.analytics-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.exception-row {
+  align-items: center;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, auto) auto;
+  padding: 12px;
+}
+
+.exception-row strong,
+.exception-row span {
+  display: block;
+}
+
+.exception-row strong {
+  color: #17202a;
+}
+
+.exception-row span,
+.exception-row em {
+  color: #667085;
+  font-size: 13px;
+  font-style: normal;
+}
+
 .question-stat-list {
   display: grid;
   gap: 10px;
@@ -1779,6 +1910,169 @@ button.metric:hover {
   border-top: 1px solid #edf1f6;
   grid-template-columns: 18px minmax(120px, 1.3fr) minmax(120px, 2fr) 96px;
   padding: 12px;
+}
+
+.mistake-filter-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  margin: 14px 0;
+}
+
+.mistake-filter-grid label {
+  color: #405164;
+  display: grid;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+}
+
+.mistake-filter-grid select {
+  background: #ffffff;
+  border: 1px solid #d8e1ec;
+  border-radius: 8px;
+  color: #17202a;
+  min-height: 38px;
+  padding: 0 9px;
+  width: 100%;
+}
+
+.mistake-record-row {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 18px minmax(180px, 1fr) 72px 96px;
+  margin-top: 8px;
+  min-height: 62px;
+  padding: 10px 12px;
+}
+
+.mistake-record-row.active {
+  border-color: #9dd1c4;
+  background: #f4fbf9;
+}
+
+.mistake-record-main {
+  background: transparent;
+  border: 0;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.mistake-record-main strong,
+.mistake-record-main span {
+  display: block;
+}
+
+.mistake-record-main strong {
+  color: #17202a;
+}
+
+.mistake-record-main span,
+.mistake-record-row em {
+  color: #667085;
+  font-size: 13px;
+  font-style: normal;
+  margin-top: 4px;
+}
+
+.mastery-row {
+  align-items: center;
+  border-top: 1px solid #edf1f6;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(90px, 1fr) minmax(80px, 1fr) 48px 36px 48px;
+  padding: 13px 0;
+}
+
+.mastery-row strong,
+.mastery-row small,
+.mastery-row em {
+  font-size: 13px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.trend-up { color: #0d7c66; }
+.trend-down { color: #c24133; }
+
+.guardian-report {
+  background: #f7fafc;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  margin-top: 16px;
+  padding: 14px;
+}
+
+.guardian-report span,
+.guardian-report strong {
+  display: block;
+}
+
+.guardian-report span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.guardian-report strong {
+  color: #17202a;
+  margin-top: 5px;
+}
+
+.guardian-report p {
+  color: #405164;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 10px 0 0;
+}
+
+.mistake-detail-panel {
+  grid-column: 1 / -1;
+}
+
+.mistake-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.mistake-detail-meta span,
+.mistake-detail-meta strong {
+  background: #f7fafc;
+  border: 1px solid #e5eaf1;
+  border-radius: 6px;
+  color: #405164;
+  font-size: 13px;
+  padding: 7px 9px;
+}
+
+.mistake-detail-meta strong {
+  color: #c24133;
+}
+
+.mistake-answer-grid {
+  display: grid;
+  gap: 0 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mistake-answer-grid div {
+  border-top: 1px solid #edf1f6;
+  padding: 14px 0;
+}
+
+.mistake-answer-grid span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mistake-answer-grid p {
+  color: #17202a;
+  line-height: 1.65;
+  margin: 6px 0 0;
 }
 
 .question-stat-row span {
@@ -1950,6 +2244,10 @@ button.metric:hover {
     grid-template-columns: 1fr;
   }
 
+  .mistake-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .grading-head-actions {
     align-items: stretch;
     flex-direction: column;
@@ -2000,12 +2298,21 @@ button.metric:hover {
   .nav,
   .table-toolbar,
   .score-summary,
+  .score-band-row,
+  .exception-row,
   .question-stat-row,
   .scan-row.table-row,
   .review-row.table-row,
   .mistake-stat-row.table-row,
   .library-card.table-row,
   .preview-file-row {
+    grid-template-columns: 1fr;
+  }
+
+  .mistake-filter-grid,
+  .mistake-record-row,
+  .mastery-row,
+  .mistake-answer-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2017,6 +2324,15 @@ button.metric:hover {
     align-items: stretch;
     display: grid;
     width: 100%;
+  }
+
+  .analytics-actions {
+    display: grid;
+    width: 100%;
+  }
+
+  .score-band-row strong {
+    text-align: left;
   }
 
   .role-switcher {

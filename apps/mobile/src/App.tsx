@@ -9,7 +9,7 @@ import {
   View
 } from "react-native";
 
-type Tab = "tasks" | "upload" | "mistakes";
+type Tab = "tasks" | "upload" | "mistakes" | "report";
 
 const tasks = [
   { id: "t1", title: "六年级数学期中卷", status: "待提交", due: "今晚 20:00", subject: "数学" },
@@ -23,13 +23,23 @@ const mistakes = [
   { id: "m3", no: "7", knowledge: "分数运算", reason: "通分步骤遗漏", score: "3/5" }
 ];
 
+const guardianReport = {
+  studentName: "李四",
+  score: 72,
+  wrongCount: 2,
+  summary: "本次基础题完成较稳定，应用题步骤还需要继续巩固。",
+  weakness: ["分数应用题", "几何面积"],
+  actions: ["每天安排 15 分钟订正", "先复习例题，再完成同类再练", "检查计算步骤和单位是否完整"]
+};
+
 function App(): React.JSX.Element {
   const [tab, setTab] = useState<Tab>("tasks");
 
   const title = useMemo(() => {
     if (tab === "tasks") return "学习任务";
     if (tab === "upload") return "拍照提交";
-    return "错题本";
+    if (tab === "mistakes") return "错题本";
+    return "学习报告";
   }, [tab]);
 
   return (
@@ -49,6 +59,7 @@ function App(): React.JSX.Element {
         <TabButton active={tab === "tasks"} label="任务" onPress={() => setTab("tasks")} />
         <TabButton active={tab === "upload"} label="上传" onPress={() => setTab("upload")} />
         <TabButton active={tab === "mistakes"} label="错题" onPress={() => setTab("mistakes")} />
+        <TabButton active={tab === "report"} label="报告" onPress={() => setTab("report")} />
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
@@ -94,6 +105,30 @@ function App(): React.JSX.Element {
                 <Pressable style={styles.secondaryAction}>
                   <Text style={styles.secondaryActionText}>再练 5 题</Text>
                 </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {tab === "report" && (
+          <View style={styles.reportSection}>
+            <View style={styles.reportHead}>
+              <View>
+                <Text style={styles.reportLabel}>{guardianReport.studentName} · 本次学习反馈</Text>
+                <Text style={styles.reportScore}>{guardianReport.score} 分</Text>
+              </View>
+              <Text style={styles.statusHot}>{guardianReport.wrongCount} 道待巩固</Text>
+            </View>
+            <Text style={styles.reportSummary}>{guardianReport.summary}</Text>
+            <Text style={styles.reportSubtitle}>需要关注</Text>
+            <View style={styles.tagList}>
+              {guardianReport.weakness.map((item) => <Text style={styles.weakTag} key={item}>{item}</Text>)}
+            </View>
+            <Text style={styles.reportSubtitle}>本周建议</Text>
+            {guardianReport.actions.map((item, index) => (
+              <View style={styles.actionRow} key={item}>
+                <Text style={styles.actionIndex}>{index + 1}</Text>
+                <Text style={styles.actionText}>{item}</Text>
               </View>
             ))}
           </View>
@@ -271,8 +306,79 @@ const styles = StyleSheet.create({
   secondaryActionText: {
     color: "#155b92",
     fontWeight: "800"
+  },
+  reportSection: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e5eaf1",
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 18
+  },
+  reportHead: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  reportLabel: {
+    color: "#667085",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  reportScore: {
+    color: "#0d7c66",
+    fontSize: 30,
+    fontWeight: "800",
+    marginTop: 4
+  },
+  reportSummary: {
+    color: "#405164",
+    fontSize: 15,
+    lineHeight: 23,
+    marginTop: 16
+  },
+  reportSubtitle: {
+    color: "#17202a",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 20
+  },
+  tagList: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 10
+  },
+  weakTag: {
+    backgroundColor: "#fff4e5",
+    borderRadius: 6,
+    color: "#9a5b00",
+    fontSize: 13,
+    fontWeight: "700",
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  actionRow: {
+    alignItems: "center",
+    borderTopColor: "#edf1f6",
+    borderTopWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    paddingVertical: 12
+  },
+  actionIndex: {
+    backgroundColor: "#e9f7f3",
+    borderRadius: 6,
+    color: "#0d7c66",
+    fontWeight: "800",
+    paddingHorizontal: 8,
+    paddingVertical: 5
+  },
+  actionText: {
+    color: "#405164",
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20
   }
 });
 
 export default App;
-

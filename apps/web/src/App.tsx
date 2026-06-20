@@ -117,6 +117,60 @@ type KnowledgeStat = {
   wrongCount: number;
 };
 
+type WrongQuestion = {
+  id: number;
+  studentId: string;
+  studentName: string;
+  className: string;
+  submissionId: string;
+  questionId: string;
+  questionNo: string;
+  questionType: string;
+  knowledgePoint: string;
+  errorType: string;
+  wrongReason: string;
+  sourcePaper: string;
+  originalQuestion: string;
+  score: number;
+  maxScore: number;
+  correctAnswer: string;
+  studentAnswer: string;
+  answerImageUrl: string;
+  explanation: string;
+  correctionStatus: string;
+  repracticeStatus: string;
+  createdAt: string;
+  knowledge: string[];
+};
+
+type WrongQuestionListResponse = { items: WrongQuestion[] };
+
+type KnowledgeMastery = {
+  name: string;
+  mastery: number;
+  previousMastery: number;
+  trend: number;
+  wrongCount: number;
+  studentCount: number;
+};
+
+type LearningProfile = {
+  className: string;
+  knowledgeMastery: KnowledgeMastery[];
+  studentRisks: StudentRisk[];
+  homeworkWatch: HomeworkWatch[];
+};
+
+type GuardianReport = {
+  studentName: string;
+  className: string;
+  summary: string;
+  score: number;
+  wrongCount: number;
+  weakness: string[];
+  actions: string[];
+};
+
 type HomeworkWatch = {
   studentName: string;
   className: string;
@@ -234,10 +288,48 @@ type QuestionStat = {
   type: string;
 };
 
+type ScoreBand = {
+  label: string;
+  min: number;
+  max: number;
+  count: number;
+};
+
+type QuestionDetailStat = {
+  no: string;
+  type: string;
+  accuracy: number;
+  scoreRate: number;
+  difficulty: string;
+  discrimination: number;
+  typicalError: string;
+};
+
 type StudentRisk = {
   studentName: string;
   risk: string;
   weakness: string[];
+};
+
+type StudentScoreSummary = {
+  studentName: string;
+  className: string;
+  score: number;
+  rank: number;
+  weakness: string[];
+};
+
+type ObjectiveReviewException = {
+  id: number;
+  submissionId: string;
+  studentName: string;
+  questionId: string;
+  questionNo: string;
+  answer: string;
+  confidence: number;
+  reason: string;
+  status: string;
+  suggestedScore: number;
 };
 
 type ClassroomAnalytics = {
@@ -245,9 +337,24 @@ type ClassroomAnalytics = {
   averageScore: number;
   highestScore: number;
   lowestScore: number;
+  studentCount: number;
+  gradedCount: number;
+  completionRate: number;
+  passRate: number;
+  excellentRate: number;
   questionStats: QuestionStat[];
+  questionDetails: QuestionDetailStat[];
   knowledgeStats: KnowledgeStat[];
   studentRisks: StudentRisk[];
+  studentScores: StudentScoreSummary[];
+  scoreBands: ScoreBand[];
+  objectiveExceptions: ObjectiveReviewException[];
+};
+
+type ScoreGenerationResponse = {
+  status: string;
+  className: string;
+  generated: number;
 };
 
 type ActiveView = "workspace" | "scan" | "templates" | "grading" | "mistakes" | "analytics";
@@ -333,6 +440,12 @@ const templateTools: Record<TemplateTool, { label: string; color: string }> = {
   subjective: { label: "主观题", color: "#0d7c66" },
   choice: { label: "选择题", color: "#7c3aed" },
   judge: { label: "判断题", color: "#b97809" }
+};
+
+const objectiveAnswerOptions: Record<Exclude<TemplateTool, "subjective">, string[]> = {
+  choice: ["A", "B", "C", "D"],
+  judge: ["正确", "错误"],
+  objective: ["A", "B", "C", "D", "正确", "错误"]
 };
 
 const templateStatusLabels: Record<TemplateStatus, string> = {
@@ -542,17 +655,79 @@ const fallbackAnalytics: ClassroomAnalytics = {
   averageScore: 81.6,
   highestScore: 98,
   lowestScore: 54,
+  studentCount: 42,
+  gradedCount: 40,
+  completionRate: 95,
+  passRate: 88,
+  excellentRate: 22,
   questionStats: [
     { no: "1", accuracy: 96, type: "单选题" },
     { no: "8", accuracy: 82, type: "填空题" },
     { no: "15", accuracy: 42, type: "应用题" },
     { no: "18", accuracy: 38, type: "应用题" }
   ],
+  questionDetails: [
+    { no: "1", type: "单选题", accuracy: 96, scoreRate: 96, difficulty: "容易", discrimination: 52, typicalError: "整体掌握较好，关注个别粗心" },
+    { no: "8", type: "填空题", accuracy: 82, scoreRate: 82, difficulty: "容易", discrimination: 56, typicalError: "单位换算漏写" },
+    { no: "15", type: "应用题", accuracy: 42, scoreRate: 48, difficulty: "偏难", discrimination: 78, typicalError: "比例关系建模不稳定" },
+    { no: "18", type: "应用题", accuracy: 38, scoreRate: 44, difficulty: "偏难", discrimination: 81, typicalError: "图形拆分和公式迁移错误" }
+  ],
   knowledgeStats: fallbackDashboard.weakPoints,
   studentRisks: [
     { studentName: "李四", risk: "连续 3 次未提交作业", weakness: ["分数应用题", "比例"] },
     { studentName: "赵六", risk: "本次低于班均 18 分", weakness: ["几何面积"] }
+  ],
+  studentScores: [
+    { studentName: "赵六", className: "六年级 3 班", score: 88, rank: 1, weakness: ["几何面积"] },
+    { studentName: "张三", className: "六年级 3 班", score: 85, rank: 2, weakness: ["表达规范"] },
+    { studentName: "王五", className: "六年级 3 班", score: 82, rank: 3, weakness: ["计算基础"] },
+    { studentName: "李四", className: "六年级 3 班", score: 72, rank: 4, weakness: ["分数应用题", "比例"] }
+  ],
+  scoreBands: [
+    { label: "0-59", min: 0, max: 59, count: 1 },
+    { label: "60-69", min: 60, max: 69, count: 3 },
+    { label: "70-79", min: 70, max: 79, count: 10 },
+    { label: "80-89", min: 80, max: 89, count: 18 },
+    { label: "90-100", min: 90, max: 100, count: 8 }
+  ],
+  objectiveExceptions: [
+    { id: 1, submissionId: "sub_002", studentName: "李四", questionId: "q_001", questionNo: "1", answer: "B", confidence: 68, reason: "低置信度且答案与标准答案不一致", status: "pending", suggestedScore: 0 }
   ]
+};
+
+const fallbackWrongQuestions: WrongQuestion[] = [
+  { id: 1, studentId: "stu_002", studentName: "李四", className: "六年级 3 班", submissionId: "sub_002", questionId: "q_001", questionNo: "1", questionType: "单选题", knowledgePoint: "分数", errorType: "concept", wrongReason: "标准答案为 A，学生选择 B", sourcePaper: "六年级数学期中卷", originalQuestion: "比较两个分数的大小，选择正确答案。", score: 0, maxScore: 2, correctAnswer: "A", studentAnswer: "B", answerImageUrl: "/mock/student-answer-q18.png", explanation: "回顾分数大小比较方法。", correctionStatus: "pending", repracticeStatus: "not_assigned", createdAt: "2026-06-20T09:00:00+08:00", knowledge: ["分数"] },
+  { id: 2, studentId: "stu_001", studentName: "张三", className: "六年级 3 班", submissionId: "sub_001", questionId: "q_015", questionNo: "15", questionType: "应用题", knowledgePoint: "比例", errorType: "expression", wrongReason: "比例关系书写不规范", sourcePaper: "六年级数学期中卷", originalQuestion: "根据比例关系解决实际问题。", score: 8, maxScore: 10, correctAnswer: "设未知数并列比例求解，结果为 24 千克。", studentAnswer: "3/5 = x/40，x = 24。", answerImageUrl: "/mock/student-answer-q15.png", explanation: "建模正确，补充规范比例式和单位说明。", correctionStatus: "pending", repracticeStatus: "not_assigned", createdAt: "2026-06-20T09:10:00+08:00", knowledge: ["比例"] },
+  { id: 3, studentId: "stu_002", studentName: "李四", className: "六年级 3 班", submissionId: "sub_002", questionId: "q_018", questionNo: "18", questionType: "应用题", knowledgePoint: "几何面积", errorType: "calculation", wrongReason: "图形拆分后面积计算不完整", sourcePaper: "六年级数学期中卷", originalQuestion: "将组合图形拆分后计算总面积。", score: 6, maxScore: 8, correctAnswer: "长方形与三角形面积相加。", studentAnswer: "长方形面积 36，三角形面积 12。", answerImageUrl: "/mock/student-answer-q18.png", explanation: "标出拆分依据并写完整单位。", correctionStatus: "pending", repracticeStatus: "not_assigned", createdAt: "2026-06-20T09:20:00+08:00", knowledge: ["几何面积"] }
+];
+
+const fallbackLearningProfile: LearningProfile = {
+  className: "六年级 3 班",
+  knowledgeMastery: [
+    { name: "分数应用题", mastery: 42, previousMastery: 38, trend: 4, wrongCount: 29, studentCount: 16 },
+    { name: "几何面积", mastery: 51, previousMastery: 57, trend: -6, wrongCount: 21, studentCount: 13 },
+    { name: "比例换算", mastery: 64, previousMastery: 59, trend: 5, wrongCount: 15, studentCount: 9 }
+  ],
+  studentRisks: fallbackAnalytics.studentRisks,
+  homeworkWatch: fallbackDashboard.homeworkWatch
+};
+
+const fallbackGuardianReport: GuardianReport = {
+  studentName: "李四",
+  className: "六年级 3 班",
+  summary: "本次成绩 72 分，共有 2 道题需要继续巩固。",
+  score: 72,
+  wrongCount: 2,
+  weakness: ["分数", "几何面积"],
+  actions: ["每天安排 15 分钟订正", "优先复习薄弱知识点", "完成再练后和孩子一起检查步骤"]
+};
+
+const errorTypeLabels: Record<string, string> = {
+  concept: "概念错误",
+  calculation: "计算错误",
+  reading: "审题错误",
+  expression: "表达不完整",
+  other: "其他"
 };
 
 function toolFromQuestionType(type: string): TemplateTool {
@@ -618,7 +793,10 @@ function hasDashboardData(data: DashboardData) {
 function hasAnalyticsData(data: ClassroomAnalytics) {
   return data.questionStats.length > 0
     || data.knowledgeStats.length > 0
-    || data.studentRisks.length > 0;
+    || data.studentRisks.length > 0
+    || data.studentScores.length > 0
+    || data.scoreBands.length > 0
+    || data.objectiveExceptions.length > 0;
 }
 
 function normalizeDashboardData(data: Partial<DashboardData> | null): DashboardData {
@@ -639,9 +817,18 @@ function normalizeAnalyticsData(data: Partial<ClassroomAnalytics> | null): Class
     averageScore: data?.averageScore ?? 0,
     highestScore: data?.highestScore ?? 0,
     lowestScore: data?.lowestScore ?? 0,
+    studentCount: data?.studentCount ?? 0,
+    gradedCount: data?.gradedCount ?? 0,
+    completionRate: data?.completionRate ?? 0,
+    passRate: data?.passRate ?? 0,
+    excellentRate: data?.excellentRate ?? 0,
     questionStats: Array.isArray(data?.questionStats) ? data.questionStats : [],
+    questionDetails: Array.isArray(data?.questionDetails) ? data.questionDetails : [],
     knowledgeStats: Array.isArray(data?.knowledgeStats) ? data.knowledgeStats : [],
-    studentRisks: Array.isArray(data?.studentRisks) ? data.studentRisks : []
+    studentRisks: Array.isArray(data?.studentRisks) ? data.studentRisks : [],
+    studentScores: Array.isArray(data?.studentScores) ? data.studentScores : [],
+    scoreBands: Array.isArray(data?.scoreBands) ? data.scoreBands : [],
+    objectiveExceptions: Array.isArray(data?.objectiveExceptions) ? data.objectiveExceptions : []
   };
 }
 
@@ -1045,6 +1232,15 @@ function App() {
   const [mistakeSort, setMistakeSort] = useState("wrong_desc");
   const [mistakePage, setMistakePage] = useState(1);
   const [selectedMistakeIds, setSelectedMistakeIds] = useState<string[]>([]);
+  const [wrongQuestions, setWrongQuestions] = useState<WrongQuestion[]>(fallbackWrongQuestions);
+  const [mistakesState, setMistakesState] = useState<RequestState>({ status: "loading", message: "正在加载错题档案" });
+  const [selectedMistake, setSelectedMistake] = useState<WrongQuestion | null>(fallbackWrongQuestions[0]);
+  const [mistakePaperFilter, setMistakePaperFilter] = useState("all");
+  const [mistakeClassFilter, setMistakeClassFilter] = useState("all");
+  const [mistakeStudentFilter, setMistakeStudentFilter] = useState("all");
+  const [mistakeKnowledgeFilter, setMistakeKnowledgeFilter] = useState("all");
+  const [learningProfile, setLearningProfile] = useState<LearningProfile>(fallbackLearningProfile);
+  const [guardianReport, setGuardianReport] = useState<GuardianReport>(fallbackGuardianReport);
 
   const publishedTemplates = useMemo(
     () => templates.filter((template) => normalizeTemplateStatus(template.status) === "published"),
@@ -1057,6 +1253,8 @@ function App() {
     loadSubjective();
     loadTemplates();
     loadAnalytics();
+    loadWrongQuestions();
+    loadLearningProfile();
   }, []);
 
   useEffect(() => {
@@ -1237,25 +1435,23 @@ function App() {
   const pagedTemplates = pageItems(filteredTemplates, templatePage);
 
   const filteredMistakes = useMemo(() => {
-    const rows = analytics.questionStats
-      .filter((item) => {
-        if (mistakeFilter === "all") {
-          return true;
-        }
-        const wrongRate = 100 - item.accuracy;
-        return mistakeFilter === "high" ? wrongRate >= 50 : wrongRate < 50;
-      })
-      .filter((item) => includesSearch(`第 ${item.no} 题 ${item.type}`, mistakeSearch));
+    const rows = wrongQuestions
+      .filter((item) => mistakeFilter === "all" || item.errorType === mistakeFilter)
+      .filter((item) => mistakePaperFilter === "all" || item.sourcePaper === mistakePaperFilter)
+      .filter((item) => mistakeClassFilter === "all" || item.className === mistakeClassFilter)
+      .filter((item) => mistakeStudentFilter === "all" || item.studentName === mistakeStudentFilter)
+      .filter((item) => mistakeKnowledgeFilter === "all" || item.knowledgePoint === mistakeKnowledgeFilter)
+      .filter((item) => includesSearch(`${item.questionNo} ${item.questionType} ${item.studentName} ${item.wrongReason}`, mistakeSearch));
     return [...rows].sort((a, b) => {
       if (mistakeSort === "question_asc") {
-        return Number(a.no) - Number(b.no);
+        return Number(a.questionNo) - Number(b.questionNo);
       }
-      if (mistakeSort === "accuracy_asc") {
-        return a.accuracy - b.accuracy;
+      if (mistakeSort === "student_asc") {
+        return a.studentName.localeCompare(b.studentName, "zh-Hans-CN");
       }
-      return (100 - b.accuracy) - (100 - a.accuracy);
+      return (a.score / Math.max(a.maxScore, 1)) - (b.score / Math.max(b.maxScore, 1));
     });
-  }, [analytics.questionStats, mistakeSearch, mistakeFilter, mistakeSort]);
+  }, [wrongQuestions, mistakeSearch, mistakeFilter, mistakeSort, mistakePaperFilter, mistakeClassFilter, mistakeStudentFilter, mistakeKnowledgeFilter]);
 
   const pagedMistakes = pageItems(filteredMistakes, mistakePage);
 
@@ -1265,7 +1461,7 @@ function App() {
       scan: [dashboardState],
       templates: [templatesState],
       grading: [subjectiveState],
-      mistakes: [analyticsState],
+      mistakes: [mistakesState, analyticsState],
       analytics: [analyticsState]
     } satisfies Record<ActiveView, RequestState[]>;
     const apiStatus = apiStatusFromRequests(requestStatesByView[activeView]);
@@ -1302,7 +1498,7 @@ function App() {
       storageStatus: "skipped" as ConnectionStatus,
       note: apiNote
     };
-  }, [activeView, dashboard.source, dashboardState, subjectiveState, templatesState, analyticsState]);
+  }, [activeView, dashboard.source, dashboardState, subjectiveState, templatesState, analyticsState, mistakesState]);
 
   const viewCopy = {
     workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
@@ -2203,6 +2399,128 @@ function App() {
       });
       return fallbackAnalytics;
     }
+  }
+
+  async function loadWrongQuestions() {
+    setMistakesState((current) => nextLoadingState(current, "正在加载错题档案", "正在刷新错题档案"));
+    try {
+      const response = await fetch("/api/mistakes");
+      if (!response.ok) throw new Error("mistakes api failed");
+      const data = await response.json() as WrongQuestionListResponse;
+      const items = Array.isArray(data.items) ? data.items : [];
+      setWrongQuestions(items);
+      setSelectedMistake((current) => items.find((item) => item.id === current?.id) ?? items[0] ?? null);
+      setMistakesState(items.length > 0
+        ? { status: "success", message: "错题档案已更新" }
+        : { status: "empty", message: "暂无错题", detail: "阅卷产生失分题后会自动归档。" });
+      return items;
+    } catch {
+      setWrongQuestions(fallbackWrongQuestions);
+      setSelectedMistake((current) => fallbackWrongQuestions.find((item) => item.id === current?.id) ?? fallbackWrongQuestions[0]);
+      setMistakesState({ status: "error", message: "错题 API 请求失败", detail: "已展示本地演示错题。" });
+      return fallbackWrongQuestions;
+    }
+  }
+
+  async function loadLearningProfile() {
+    try {
+      const response = await fetch("/api/learning/profile?className=六年级%203%20班");
+      if (!response.ok) throw new Error("profile api failed");
+      const data = await response.json() as LearningProfile;
+      setLearningProfile({
+        className: data.className ?? "六年级 3 班",
+        knowledgeMastery: Array.isArray(data.knowledgeMastery) ? data.knowledgeMastery : [],
+        studentRisks: Array.isArray(data.studentRisks) ? data.studentRisks : [],
+        homeworkWatch: Array.isArray(data.homeworkWatch) ? data.homeworkWatch : []
+      });
+    } catch {
+      setLearningProfile(fallbackLearningProfile);
+    }
+  }
+
+  async function loadGuardianReport(studentName: string) {
+    try {
+      const response = await fetch("/api/reports/guardian?studentName=" + encodeURIComponent(studentName));
+      if (!response.ok) throw new Error("guardian report api failed");
+      setGuardianReport(await response.json() as GuardianReport);
+      setNotice("已生成 " + studentName + " 的家长报告");
+    } catch {
+      setGuardianReport({ ...fallbackGuardianReport, studentName });
+      setNotice("家长报告 API 不可用，已展示演示报告");
+    }
+  }
+
+  async function openMistakeDetail(item: WrongQuestion) {
+    setSelectedMistake(item);
+    try {
+      const response = await fetch("/api/mistakes/" + item.id);
+      if (response.ok) setSelectedMistake(await response.json() as WrongQuestion);
+    } catch {
+      setSelectedMistake(item);
+    }
+  }
+
+  async function createRepracticeTask() {
+    const ids = selectedMistakeIds.length > 0
+      ? selectedMistakeIds.map(Number)
+      : selectedMistake ? [selectedMistake.id] : [];
+    if (ids.length === 0) {
+      setNotice("请先选择需要再练的错题");
+      return;
+    }
+    try {
+      const response = await fetch("/api/mistakes/repractice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wrongQuestionIds: ids, title: "错题订正与再练" })
+      });
+      if (!response.ok) throw new Error("repractice api failed");
+      const data = await response.json() as { linkedCount: number };
+      setWrongQuestions((current) => current.map((item) => ids.includes(item.id) ? { ...item, repracticeStatus: "assigned" } : item));
+      setSelectedMistakeIds([]);
+      setNotice("已生成再练任务，关联 " + data.linkedCount + " 道错题");
+    } catch {
+      setNotice("再练任务创建失败，请检查 Go API 和数据库");
+    }
+  }
+
+  async function generateScores() {
+    setAnalyticsState({ status: "processing", message: "正在统一生成题分和总分" });
+    try {
+      const response = await fetch(`/api/analytics/generate-scores?className=${encodeURIComponent(analytics.className)}`, {
+        method: "POST"
+      });
+      if (!response.ok) {
+        throw new Error("score generation failed");
+      }
+      const result = await response.json() as ScoreGenerationResponse;
+      setNotice(`${result.className} 已生成 ${result.generated} 份成绩`);
+      const data = await loadAnalytics();
+      setAnalyticsState(hasAnalyticsData(data)
+        ? { status: "success", message: "成绩统计已重新生成" }
+        : { status: "empty", message: "暂无可统计成绩", detail: "请确认扫描识别和阅卷结果已入库。" });
+    } catch {
+      setAnalyticsState({
+        status: "error",
+        message: "成绩生成失败",
+        detail: "请确认 Go API 和数据库可用，或稍后重试。"
+      });
+    }
+  }
+
+  function exportScores() {
+    setNotice("正在导出成绩单 CSV");
+    window.location.href = "/api/analytics/export/scores.csv";
+  }
+
+  function confirmObjectiveException(id: number) {
+    setAnalytics((current) => ({
+      ...current,
+      objectiveExceptions: current.objectiveExceptions.map((item) => (
+        item.id === id ? { ...item, status: "confirmed" } : item
+      ))
+    }));
+    setNotice("客观题异常已标记为人工确认");
   }
 
   function questionRegionStyle(region: Region) {
@@ -3716,6 +4034,27 @@ function App() {
 	                      value={selectedCanvasRegion?.standardAnswer ?? ""}
 	                    />
 	                  </label>
+	                  {selectedCanvasRegion && selectedCanvasRegion.type !== "subjective" ? (
+	                    <div className="objective-config-panel">
+	                      <div>
+	                        <strong>客观题答案配置</strong>
+	                        <span>{selectedCanvasRegion.score} 分 · {selectedCanvasRegion.standardAnswer || "未配置答案"}</span>
+	                      </div>
+	                      <div className="answer-chip-list">
+	                        {objectiveAnswerOptions[selectedCanvasRegion.type].map((answer) => (
+	                          <button
+	                            className={selectedCanvasRegion.standardAnswer === answer ? "template-chip active" : "template-chip"}
+	                            disabled={!canEditSelectedTemplate}
+	                            key={`${selectedCanvasRegion.id}-${answer}`}
+	                            onClick={() => updateSelectedRegion((item) => ({ ...item, standardAnswer: answer, scoringRules: item.scoringRules.length > 0 ? item.scoringRules : ["答案一致得满分", "缺答或识别异常进入复核"] }))}
+	                            type="button"
+	                          >
+	                            {answer}
+	                          </button>
+	                        ))}
+	                      </div>
+	                    </div>
+	                  ) : null}
 	                  <label>
 	                    采分点
 	                    <textarea
@@ -3785,19 +4124,21 @@ function App() {
                   <h2>错题归档</h2>
                 </div>
                 {can("mistake:generate") ? (
-                  <button className="primary-button" onClick={() => openMistakeView("high")} type="button"><BookOpenCheck size={18} />生成错题本</button>
+                  <button className="primary-button" onClick={() => void createRepracticeTask()} type="button"><BookOpenCheck size={18} />生成再练任务</button>
                 ) : null}
               </div>
-              <RequestStateView state={analyticsState} onRetry={() => loadAnalytics()} compact />
+              <RequestStateView state={mistakesState} onRetry={() => loadWrongQuestions()} compact />
               <TableToolbar
                 batchLabel="批量再练"
                 filterOptions={[
                   { label: "全部错题", value: "all" },
-                  { label: "高错误率", value: "high" },
-                  { label: "低于 50%", value: "low" }
+                  { label: "概念错误", value: "concept" },
+                  { label: "计算错误", value: "calculation" },
+                  { label: "审题错误", value: "reading" },
+                  { label: "表达不完整", value: "expression" }
                 ]}
                 filterValue={mistakeFilter}
-                onBatchAction={() => runBatchAction("错题批量操作", selectedMistakeIds.length)}
+                onBatchAction={() => void createRepracticeTask()}
                 onFilterChange={(value) => {
                   setMistakeFilter(value);
                   setMistakePage(1);
@@ -3810,40 +4151,47 @@ function App() {
                   setMistakeSort(value);
                   setMistakePage(1);
                 }}
-                searchPlaceholder="题号或题型"
+                searchPlaceholder="题号、学生、错因"
                 searchValue={mistakeSearch}
                 selectedCount={selectedMistakeIds.length}
                 sortOptions={[
-                  { label: "错误率高到低", value: "wrong_desc" },
+                  { label: "得分率低到高", value: "wrong_desc" },
                   { label: "题号升序", value: "question_asc" },
-                  { label: "正确率低到高", value: "accuracy_asc" }
+                  { label: "学生姓名", value: "student_asc" }
                 ]}
                 sortValue={mistakeSort}
                 totalCount={filteredMistakes.length}
               />
+              <div className="mistake-filter-grid">
+                <label>考试<select value={mistakePaperFilter} onChange={(event: { target: { value: string } }) => setMistakePaperFilter(event.target.value)}><option value="all">全部考试</option>{Array.from(new Set(wrongQuestions.map((item) => item.sourcePaper))).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+                <label>班级<select value={mistakeClassFilter} onChange={(event: { target: { value: string } }) => setMistakeClassFilter(event.target.value)}><option value="all">全部班级</option>{Array.from(new Set(wrongQuestions.map((item) => item.className))).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+                <label>学生<select value={mistakeStudentFilter} onChange={(event: { target: { value: string } }) => setMistakeStudentFilter(event.target.value)}><option value="all">全部学生</option>{Array.from(new Set(wrongQuestions.map((item) => item.studentName))).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+                <label>知识点<select value={mistakeKnowledgeFilter} onChange={(event: { target: { value: string } }) => setMistakeKnowledgeFilter(event.target.value)}><option value="all">全部知识点</option>{Array.from(new Set(wrongQuestions.map((item) => item.knowledgePoint))).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+              </div>
               {filteredMistakes.length > 0 ? (
                 pagedMistakes.map((item) => {
-                  const rowId = `${item.no}-${item.type}`;
+                  const rowId = String(item.id);
                   return (
-                  <div className="question-stat-row mistake-stat-row table-row" key={`mistake-${item.no}-${item.type}`}>
+                  <div className={selectedMistake?.id === item.id ? "mistake-record-row table-row active" : "mistake-record-row table-row"} key={item.id}>
                     <input
-                      aria-label={`选择第${item.no}题`}
+                      aria-label={"选择第" + item.questionNo + "题"}
                       checked={selectedMistakeIds.includes(rowId)}
                       onChange={() => toggleSelected(rowId, selectedMistakeIds, setSelectedMistakeIds)}
                       type="checkbox"
                     />
-                    <span>第 {item.no} 题 · {item.type}</span>
-                    <div className="accuracy-bar">
-                      <div style={{ width: `${item.accuracy}%` }} />
-                    </div>
-                    <strong>{100 - item.accuracy}% 错误</strong>
+                    <button className="mistake-record-main" onClick={() => void openMistakeDetail(item)} type="button">
+                      <strong>第 {item.questionNo} 题 · {item.studentName}</strong>
+                      <span>{item.sourcePaper} · {item.knowledgePoint} · {errorTypeLabels[item.errorType] ?? "其他"}</span>
+                    </button>
+                    <em>{item.score}/{item.maxScore} 分</em>
+                    <span className={item.repracticeStatus === "assigned" ? "status-pill published" : "status-pill draft"}>{item.repracticeStatus === "assigned" ? "已布置再练" : "待订正"}</span>
                   </div>
                   );
                 })
               ) : (
                 <RequestStateView
                   compact
-                  onRetry={() => loadAnalytics()}
+                  onRetry={() => loadWrongQuestions()}
                   state={{ status: "empty", message: "没有符合条件的错题", detail: "调整搜索或筛选条件后重试。" }}
                 />
               )}
@@ -3853,15 +4201,17 @@ function App() {
               <div className="panel-head">
                 <div>
                   <p className="eyebrow">Knowledge</p>
-                  <h2>按知识点整理</h2>
+                  <h2>知识点掌握度</h2>
                 </div>
               </div>
-              {analytics.knowledgeStats.length > 0 ? (
-                analytics.knowledgeStats.map((item) => (
-                  <button className="knowledge-row row-button" key={`wrong-${item.name}`} onClick={() => openMistakeView("high")} type="button">
+              {learningProfile.knowledgeMastery.length > 0 ? (
+                learningProfile.knowledgeMastery.map((item) => (
+                  <button className="mastery-row row-button" key={item.name} onClick={() => setMistakeKnowledgeFilter(item.name)} type="button">
                     <span>{item.name}</span>
-                    <strong>{item.accuracy}%</strong>
-                    <small>{item.wrongCount} 次错误</small>
+                    <div className="accuracy-bar"><div style={{ width: item.mastery + "%" }} /></div>
+                    <strong>{item.mastery}%</strong>
+                    <small className={item.trend >= 0 ? "trend-up" : "trend-down"}>{item.trend >= 0 ? "+" : ""}{item.trend}</small>
+                    <em>{item.studentCount} 人</em>
                   </button>
                 ))
               ) : (
@@ -3871,7 +4221,37 @@ function App() {
                   state={{ status: "empty", message: "暂无知识点错题", detail: "知识点统计生成后会显示在这里。" }}
                 />
               )}
+              <h3 className="analytics-section-title">学生预警</h3>
+              {learningProfile.studentRisks.map((item) => (
+                <button className="warning-row row-button" key={item.studentName + item.risk} onClick={() => void loadGuardianReport(item.studentName)} type="button">
+                  <div><strong>{item.studentName}</strong><span>{item.risk}</span></div>
+                  <em>{item.weakness.join("、")}</em>
+                </button>
+              ))}
+              <div className="guardian-report">
+                <div><span>家长可读报告 · {guardianReport.studentName}</span><strong>{guardianReport.summary}</strong></div>
+                <p>建议：{guardianReport.actions.join("；")}</p>
+              </div>
             </div>
+            {selectedMistake ? (
+              <div className="panel mistake-detail-panel">
+                <div className="panel-head">
+                  <div><p className="eyebrow">Mistake Detail</p><h2>第 {selectedMistake.questionNo} 题完整复盘</h2></div>
+                  <button className="secondary-button" onClick={() => void createRepracticeTask()} type="button"><BookOpenCheck size={18} />加入再练</button>
+                </div>
+                <div className="mistake-detail-meta">
+                  <span>{selectedMistake.studentName}</span><span>{selectedMistake.className}</span><span>{selectedMistake.sourcePaper}</span>
+                  <span>{selectedMistake.knowledgePoint}</span><span>{errorTypeLabels[selectedMistake.errorType] ?? "其他"}</span>
+                  <strong>{selectedMistake.score}/{selectedMistake.maxScore} 分</strong>
+                </div>
+                <div className="mistake-answer-grid">
+                  <div><span>原题</span><p>{selectedMistake.originalQuestion || "原题内容待补充"}</p></div>
+                  <div><span>学生答案</span><p>{selectedMistake.studentAnswer || "未作答"}</p></div>
+                  <div><span>正确答案</span><p>{selectedMistake.correctAnswer}</p></div>
+                  <div><span>错因与解析</span><p>{selectedMistake.wrongReason}。{selectedMistake.explanation}</p></div>
+                </div>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -3883,9 +4263,21 @@ function App() {
                 <p className="eyebrow">Class Analytics</p>
                 <h2>{analytics.className} 学情概览</h2>
               </div>
+              <div className="analytics-actions">
+                <button className="secondary-button" onClick={exportScores} type="button"><FileStack size={18} />导出报表</button>
+                <button className="primary-button" onClick={() => void generateScores()} type="button"><Check size={18} />生成成绩</button>
+              </div>
             </div>
             <RequestStateView state={analyticsState} onRetry={() => loadAnalytics()} compact />
             <div className="score-summary">
+              <div>
+                <span>应阅人数</span>
+                <strong>{analytics.studentCount}</strong>
+              </div>
+              <div>
+                <span>已生成</span>
+                <strong>{analytics.gradedCount}</strong>
+              </div>
               <div>
                 <span>平均分</span>
                 <strong>{analytics.averageScore.toFixed(1)}</strong>
@@ -3898,25 +4290,123 @@ function App() {
                 <span>最低分</span>
                 <strong>{analytics.lowestScore.toFixed(0)}</strong>
               </div>
+              <div>
+                <span>完成率</span>
+                <strong>{analytics.completionRate}%</strong>
+              </div>
+              <div>
+                <span>及格 / 优秀</span>
+                <strong>{analytics.passRate}% / {analytics.excellentRate}%</strong>
+              </div>
             </div>
-            <div className="question-stat-list">
-              {analytics.questionStats.length > 0 ? (
-                analytics.questionStats.slice(0, 5).map((item) => (
-                  <div className="question-stat-row" key={`${item.no}-${item.type}`}>
-                    <span>第 {item.no} 题 · {item.type}</span>
-                    <div className="accuracy-bar">
-                      <div style={{ width: `${item.accuracy}%` }} />
+            {analytics.scoreBands.length > 0 ? (
+              <div className="score-band-list">
+                {analytics.scoreBands.map((item) => {
+                  const ratio = analytics.gradedCount > 0 ? Math.round((item.count / analytics.gradedCount) * 100) : 0;
+                  return (
+                    <div className="score-band-row" key={item.label}>
+                      <span>{item.label} 分</span>
+                      <div className="accuracy-bar">
+                        <div style={{ width: `${ratio}%` }} />
+                      </div>
+                      <strong>{item.count} 人</strong>
                     </div>
-                    <strong>{item.accuracy}%</strong>
+                  );
+                })}
+              </div>
+            ) : null}
+            <h3 className="analytics-section-title">题目维度统计</h3>
+            <div className="analytics-table-wrap">
+              <table className="analytics-table">
+                <thead>
+                  <tr>
+                    <th>题目</th>
+                    <th>正确率</th>
+                    <th>得分率</th>
+                    <th>难度</th>
+                    <th>区分度</th>
+                    <th>典型错误</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.questionDetails.length > 0 ? (
+                    analytics.questionDetails.slice(0, 8).map((item) => (
+                      <tr key={`${item.no}-${item.type}`}>
+                        <td>第 {item.no} 题 · {item.type}</td>
+                        <td>{item.accuracy}%</td>
+                        <td>{item.scoreRate}%</td>
+                        <td>{item.difficulty}</td>
+                        <td>{item.discrimination}</td>
+                        <td>{item.typicalError}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={6}>暂无题目维度统计</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Objective Review</p>
+                <h2>客观题异常复核</h2>
+              </div>
+            </div>
+            {analytics.objectiveExceptions.length > 0 ? (
+              <div className="exception-list">
+                {analytics.objectiveExceptions.slice(0, 5).map((item) => (
+                  <div className="exception-row" key={item.id}>
+                    <div>
+                      <strong>{item.studentName || item.submissionId} · 第 {item.questionNo} 题</strong>
+                      <span>{item.reason}</span>
+                    </div>
+                    <em>{item.answer || "缺答"} · {item.confidence}% · {item.status}</em>
+                    <button className="template-chip" onClick={() => confirmObjectiveException(item.id)} type="button">人工确认</button>
                   </div>
-                ))
-              ) : (
-                <RequestStateView
-                  compact
-                  onRetry={() => loadAnalytics()}
-                  state={{ status: "empty", message: "暂无题目统计", detail: "完成阅卷后会显示各题正确率。" }}
-                />
-              )}
+                ))}
+              </div>
+            ) : (
+              <RequestStateView
+                compact
+                onRetry={() => loadAnalytics()}
+                state={{ status: "empty", message: "暂无客观题异常", detail: "低置信度、缺答或多选异常会显示在这里。" }}
+              />
+            )}
+            <h3 className="analytics-section-title">学生维度统计</h3>
+            <div className="analytics-table-wrap">
+              <table className="analytics-table">
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>学生</th>
+                    <th>班级</th>
+                    <th>总分</th>
+                    <th>薄弱知识点</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.studentScores.length > 0 ? (
+                    analytics.studentScores.slice(0, 8).map((item) => (
+                      <tr key={`${item.rank}-${item.studentName}`}>
+                        <td>{item.rank}</td>
+                        <td>{item.studentName}</td>
+                        <td>{item.className}</td>
+                        <td>{item.score.toFixed(1)}</td>
+                        <td>{item.weakness.length > 0 ? item.weakness.join("、") : "暂无"}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>暂无学生成绩画像</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
 

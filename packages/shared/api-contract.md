@@ -33,6 +33,13 @@
 - `PUT /api/templates/{templateID}/regions/{regionID}`
 - `DELETE /api/templates/{templateID}/regions/{regionID}`
 - `GET /api/analytics/classroom`
+- `POST /api/analytics/generate-scores`
+- `GET /api/analytics/export/scores.csv`
+- `GET /api/mistakes`
+- `GET /api/mistakes/{mistakeID}`
+- `POST /api/mistakes/repractice`
+- `GET /api/learning/profile`
+- `GET /api/reports/guardian`
 - `GET /api/dev/connections`
 - `POST /api/dev/reset-demo`
 
@@ -266,6 +273,8 @@ Manual student matching:
 
 `GET /api/scan/tasks/{taskID}/preview` returns the task and its files with `url`, `page`, `status`, `studentName`, `matchStatus`, and per-file `failureReason` so Web can preview original scans before grading.
 
+OMR/OCR objective answers in Worker write-back are persisted by the Go API when `result.omrResults[].answers[]` contains `questionNo`, `selected`, and `confidence`. The API matches answers to the task's published template and submissions, writes `objective_grades` and `question_scores`, and creates `objective_review_exceptions` for low-confidence or empty answers so they do not silently become final scores.
+
 ## AI Template Suggestions
 
 `POST /api/templates/{templateID}/ai-suggestions` returns Worker-style paper split suggestions for a saved draft template. Web loads these regions into the template canvas; the teacher confirms them by calling `PUT /api/templates/{templateID}/regions`.
@@ -468,6 +477,117 @@ Single-region mutation response:
 }
 ```
 
+## Objective Grading And Analytics
+
+`GET /api/analytics/classroom` returns the class score overview, score bands, question-level statistics, student-level rankings, weak knowledge points, and objective-answer exceptions.
+
+```json
+{
+  "className": "六年级 3 班",
+  "averageScore": 81.6,
+  "highestScore": 98,
+  "lowestScore": 54,
+  "studentCount": 42,
+  "gradedCount": 40,
+  "completionRate": 95,
+  "passRate": 88,
+  "excellentRate": 22,
+  "scoreBands": [
+    { "label": "80-89", "min": 80, "max": 89, "count": 18 }
+  ],
+  "questionDetails": [
+    {
+      "no": "18",
+      "type": "应用题",
+      "accuracy": 38,
+      "scoreRate": 44,
+      "difficulty": "偏难",
+      "discrimination": 81,
+      "typicalError": "图形拆分和公式迁移错误"
+    }
+  ],
+  "studentScores": [
+    {
+      "studentName": "李四",
+      "className": "六年级 3 班",
+      "score": 72,
+      "rank": 4,
+      "weakness": ["分数应用题", "比例"]
+    }
+  ],
+  "objectiveExceptions": [
+    {
+      "id": 1,
+      "submissionId": "sub_002",
+      "studentName": "李四",
+      "questionId": "q_001",
+      "questionNo": "1",
+      "answer": "B",
+      "confidence": 68,
+      "reason": "低置信度且答案与标准答案不一致",
+      "status": "pending",
+      "suggestedScore": 0
+    }
+  ]
+}
+```
+
+`POST /api/analytics/generate-scores?className=六年级%203%20班` runs a database transaction that copies objective grades into final question scores, sums all question scores per submission, upserts `exam_scores`, and marks submissions as graded.
+
+```json
+{
+  "status": "generated",
+  "className": "六年级 3 班",
+  "generated": 40
+}
+```
+
+`GET /api/analytics/export/scores.csv` downloads a UTF-8 CSV score sheet with student, class, total score, rank, and weak knowledge points.
+
+## Wrong Questions And Learning Profile
+
+`GET /api/mistakes` returns automatically archived objective and subjective mistakes. Optional query parameters are `paper`, `className`, `studentName`, `knowledge`, `errorType`, and `search`. Standard `errorType` values are `concept`, `calculation`, `reading`, `expression`, and `other`.
+
+```json
+{
+  "items": [
+    {
+      "id": 2,
+      "studentName": "张三",
+      "className": "六年级 3 班",
+      "questionNo": "15",
+      "questionType": "subjective",
+      "knowledgePoint": "比例",
+      "errorType": "expression",
+      "wrongReason": "比例关系书写不规范",
+      "sourcePaper": "六年级数学期中卷",
+      "originalQuestion": "根据比例关系解决实际问题。",
+      "score": 8,
+      "maxScore": 10,
+      "correctAnswer": "设未知数并列比例求解，结果为 24 千克。",
+      "studentAnswer": "3/5 = x/40，x = 24。",
+      "explanation": "建模正确，补充规范比例式和单位说明。",
+      "correctionStatus": "pending",
+      "repracticeStatus": "not_assigned"
+    }
+  ]
+}
+```
+
+`GET /api/mistakes/{mistakeID}` returns one full review record. `POST /api/mistakes/repractice` creates an assignment linked to the selected mistakes and knowledge points.
+
+```json
+{
+  "wrongQuestionIds": [1, 2],
+  "title": "错题订正与再练",
+  "dueAt": "2026-06-23 18:00:00"
+}
+```
+
+`GET /api/learning/profile?className=六年级%203%20班` returns class knowledge mastery with current/previous values, trend, error count, affected-student count, student risks, and missing-work alerts. Score generation stores a daily mastery snapshot calculated from per-question score rate and wrong-question frequency, so trends can compare multiple exams.
+
+`GET /api/reports/guardian?studentName=李四` returns a simplified guardian-facing summary with the latest score, mistake count, weak knowledge points, and concrete home-study actions.
+
 ## Core Data Model
 
 The Go API schema now keeps the main business entities in relational tables so dashboard, scan, grading, and analytics queries share the same source of truth.
@@ -499,6 +619,7 @@ Grading and traceability:
 - `student_answers`: normalized answer text/image per submission-question.
 - `ocr_results`: OCR text, confidence, provider, block JSON, and source object key.
 - `objective_grades`: objective question score, answer comparison, confidence.
+- `objective_review_exceptions`: low-confidence, missing, or abnormal objective answers waiting for manual confirmation.
 - `subjective_reviews`: AI suggestion and pending teacher review queue.
 - `grading_decisions`: final teacher decision per submission-question.
 - `question_scores`: final per-question score used by reports and analytics.
@@ -507,6 +628,8 @@ Grading and traceability:
 Wrong-question archive:
 
 - `wrong_questions`: student, submission, question, knowledge point, score/max score, correct answer, student answer, teacher explanation, correction status, repractice status, correction time.
+- `repractice_tasks`: selected wrong-question ids, linked knowledge points, due time, and assignment status.
+- `knowledge_mastery_history`: dated class/student mastery snapshots used for multi-exam trend comparison.
 
 Object storage metadata:
 

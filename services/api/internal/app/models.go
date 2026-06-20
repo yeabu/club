@@ -167,6 +167,84 @@ type KnowledgeStat struct {
 	WrongCount int    `json:"wrongCount"`
 }
 
+type WrongQuestion struct {
+	ID               int64    `json:"id"`
+	StudentID        string   `json:"studentId"`
+	StudentName      string   `json:"studentName"`
+	ClassName        string   `json:"className"`
+	SubmissionID     string   `json:"submissionId"`
+	QuestionID       string   `json:"questionId"`
+	QuestionNo       string   `json:"questionNo"`
+	QuestionType     string   `json:"questionType"`
+	KnowledgePoint   string   `json:"knowledgePoint"`
+	ErrorType        string   `json:"errorType"`
+	WrongReason      string   `json:"wrongReason"`
+	SourcePaper      string   `json:"sourcePaper"`
+	OriginalQuestion string   `json:"originalQuestion"`
+	Score            float64  `json:"score"`
+	MaxScore         float64  `json:"maxScore"`
+	CorrectAnswer    string   `json:"correctAnswer"`
+	StudentAnswer    string   `json:"studentAnswer"`
+	AnswerImageURL   string   `json:"answerImageUrl"`
+	Explanation      string   `json:"explanation"`
+	CorrectionStatus string   `json:"correctionStatus"`
+	RepracticeStatus string   `json:"repracticeStatus"`
+	CreatedAt        string   `json:"createdAt"`
+	Knowledge        []string `json:"knowledge"`
+}
+
+type WrongQuestionListResponse struct {
+	Items []WrongQuestion `json:"items"`
+}
+
+type WrongQuestionFilters struct {
+	Paper       string
+	ClassName   string
+	StudentName string
+	Knowledge   string
+	ErrorType   string
+	Search      string
+}
+
+type RepracticeTaskRequest struct {
+	WrongQuestionIDs []int64 `json:"wrongQuestionIds"`
+	Title            string  `json:"title"`
+	DueAt            string  `json:"dueAt"`
+}
+
+type RepracticeTaskResponse struct {
+	Status      string   `json:"status"`
+	TaskID      string   `json:"taskId"`
+	LinkedCount int      `json:"linkedCount"`
+	Knowledge   []string `json:"knowledge"`
+}
+
+type KnowledgeMastery struct {
+	Name            string `json:"name"`
+	Mastery         int    `json:"mastery"`
+	PreviousMastery int    `json:"previousMastery"`
+	Trend           int    `json:"trend"`
+	WrongCount      int    `json:"wrongCount"`
+	StudentCount    int    `json:"studentCount"`
+}
+
+type LearningProfileResponse struct {
+	ClassName        string             `json:"className"`
+	KnowledgeMastery []KnowledgeMastery `json:"knowledgeMastery"`
+	StudentRisks     []StudentRisk      `json:"studentRisks"`
+	HomeworkWatch    []HomeworkWatch    `json:"homeworkWatch"`
+}
+
+type GuardianReportResponse struct {
+	StudentName string   `json:"studentName"`
+	ClassName   string   `json:"className"`
+	Summary     string   `json:"summary"`
+	Score       float64  `json:"score"`
+	WrongCount  int      `json:"wrongCount"`
+	Weakness    []string `json:"weakness"`
+	Actions     []string `json:"actions"`
+}
+
 type HomeworkWatch struct {
 	StudentName string `json:"studentName"`
 	ClassName   string `json:"className"`
@@ -294,13 +372,67 @@ type Region struct {
 }
 
 type ClassroomAnalytics struct {
-	ClassName      string          `json:"className"`
-	AverageScore   float64         `json:"averageScore"`
-	HighestScore   float64         `json:"highestScore"`
-	LowestScore    float64         `json:"lowestScore"`
-	QuestionStats  []QuestionStat  `json:"questionStats"`
-	KnowledgeStats []KnowledgeStat `json:"knowledgeStats"`
-	StudentRisks   []StudentRisk   `json:"studentRisks"`
+	ClassName           string                     `json:"className"`
+	AverageScore        float64                    `json:"averageScore"`
+	HighestScore        float64                    `json:"highestScore"`
+	LowestScore         float64                    `json:"lowestScore"`
+	StudentCount        int                        `json:"studentCount"`
+	GradedCount         int                        `json:"gradedCount"`
+	CompletionRate      int                        `json:"completionRate"`
+	PassRate            int                        `json:"passRate"`
+	ExcellentRate       int                        `json:"excellentRate"`
+	QuestionStats       []QuestionStat             `json:"questionStats"`
+	QuestionDetails     []QuestionDetailStat       `json:"questionDetails"`
+	KnowledgeStats      []KnowledgeStat            `json:"knowledgeStats"`
+	StudentRisks        []StudentRisk              `json:"studentRisks"`
+	StudentScores       []StudentScoreSummary      `json:"studentScores"`
+	ScoreBands          []ScoreBand                `json:"scoreBands"`
+	ObjectiveExceptions []ObjectiveReviewException `json:"objectiveExceptions"`
+}
+
+type ScoreBand struct {
+	Label string `json:"label"`
+	Min   int    `json:"min"`
+	Max   int    `json:"max"`
+	Count int    `json:"count"`
+}
+
+type QuestionDetailStat struct {
+	No             string `json:"no"`
+	Type           string `json:"type"`
+	Accuracy       int    `json:"accuracy"`
+	ScoreRate      int    `json:"scoreRate"`
+	Difficulty     string `json:"difficulty"`
+	Discrimination int    `json:"discrimination"`
+	TypicalError   string `json:"typicalError"`
+}
+
+type StudentScoreSummary struct {
+	StudentName string   `json:"studentName"`
+	ClassName   string   `json:"className"`
+	Score       float64  `json:"score"`
+	Rank        int      `json:"rank"`
+	Weakness    []string `json:"weakness"`
+}
+
+type ObjectiveReviewException struct {
+	ID             int64   `json:"id"`
+	SubmissionID   string  `json:"submissionId"`
+	StudentName    string  `json:"studentName"`
+	QuestionID     string  `json:"questionId"`
+	QuestionNo     string  `json:"questionNo"`
+	Answer         string  `json:"answer"`
+	Confidence     int     `json:"confidence"`
+	Reason         string  `json:"reason"`
+	Status         string  `json:"status"`
+	SuggestedScore float64 `json:"suggestedScore"`
+}
+
+type ScoreGenerationResponse struct {
+	Status    string `json:"status"`
+	ExamID    string `json:"examId,omitempty"`
+	ClassName string `json:"className"`
+	Generated int    `json:"generated"`
 }
 
 type QuestionStat struct {

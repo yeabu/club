@@ -173,15 +173,26 @@ func templateAISuggestionFixture(template PaperTemplate, req TemplateAISuggestio
 
 func analyticsFixture() ClassroomAnalytics {
 	return ClassroomAnalytics{
-		ClassName:    "六年级 3 班",
-		AverageScore: 81.6,
-		HighestScore: 98,
-		LowestScore:  54,
+		ClassName:      "六年级 3 班",
+		AverageScore:   81.6,
+		HighestScore:   98,
+		LowestScore:    54,
+		StudentCount:   42,
+		GradedCount:    40,
+		CompletionRate: 95,
+		PassRate:       88,
+		ExcellentRate:  22,
 		QuestionStats: []QuestionStat{
 			{No: "1", Accuracy: 96, Type: "单选题"},
 			{No: "8", Accuracy: 82, Type: "填空题"},
 			{No: "15", Accuracy: 42, Type: "应用题"},
 			{No: "18", Accuracy: 38, Type: "应用题"},
+		},
+		QuestionDetails: []QuestionDetailStat{
+			{No: "1", Type: "单选题", Accuracy: 96, ScoreRate: 96, Difficulty: "容易", Discrimination: 52, TypicalError: "整体掌握较好，关注个别粗心"},
+			{No: "8", Type: "填空题", Accuracy: 82, ScoreRate: 82, Difficulty: "容易", Discrimination: 56, TypicalError: "单位换算漏写"},
+			{No: "15", Type: "应用题", Accuracy: 42, ScoreRate: 48, Difficulty: "偏难", Discrimination: 78, TypicalError: "比例关系建模不稳定"},
+			{No: "18", Type: "应用题", Accuracy: 38, ScoreRate: 44, Difficulty: "偏难", Discrimination: 81, TypicalError: "图形拆分和公式迁移错误"},
 		},
 		KnowledgeStats: []KnowledgeStat{
 			{Name: "分数应用题", Accuracy: 42, WrongCount: 29},
@@ -193,5 +204,55 @@ func analyticsFixture() ClassroomAnalytics {
 			{StudentName: "李四", Risk: "连续 3 次未提交作业", Weakness: []string{"分数应用题", "比例"}},
 			{StudentName: "赵六", Risk: "本次低于班均 18 分", Weakness: []string{"几何面积"}},
 		},
+		StudentScores: []StudentScoreSummary{
+			{StudentName: "赵六", ClassName: "六年级 3 班", Score: 88, Rank: 1, Weakness: []string{"几何面积"}},
+			{StudentName: "张三", ClassName: "六年级 3 班", Score: 85, Rank: 2, Weakness: []string{"表达规范"}},
+			{StudentName: "王五", ClassName: "六年级 3 班", Score: 82, Rank: 3, Weakness: []string{"计算基础"}},
+			{StudentName: "李四", ClassName: "六年级 3 班", Score: 72, Rank: 4, Weakness: []string{"分数应用题", "比例"}},
+		},
+		ScoreBands: []ScoreBand{
+			{Label: "0-59", Min: 0, Max: 59, Count: 1},
+			{Label: "60-69", Min: 60, Max: 69, Count: 3},
+			{Label: "70-79", Min: 70, Max: 79, Count: 10},
+			{Label: "80-89", Min: 80, Max: 89, Count: 18},
+			{Label: "90-100", Min: 90, Max: 100, Count: 8},
+		},
+		ObjectiveExceptions: []ObjectiveReviewException{
+			{ID: 1, SubmissionID: "sub_002", StudentName: "李四", QuestionID: "q_001", QuestionNo: "1", Answer: "B", Confidence: 68, Reason: "低置信度且答案与标准答案不一致", Status: "pending", SuggestedScore: 0},
+		},
 	}
+}
+
+func wrongQuestionsFixture() []WrongQuestion {
+	return []WrongQuestion{
+		{ID: 1, StudentID: "stu_002", StudentName: "李四", ClassName: "六年级 3 班", SubmissionID: "sub_002", QuestionID: "q_001", QuestionNo: "1", QuestionType: "single_choice", KnowledgePoint: "分数", ErrorType: "concept", WrongReason: "标准答案为 A，学生选择 B", SourcePaper: "六年级数学期中卷", OriginalQuestion: "比较两个分数的大小，选择正确答案。", Score: 0, MaxScore: 2, CorrectAnswer: "A", StudentAnswer: "B", AnswerImageURL: "/mock/student-answer-q18.png", Explanation: "回顾分数大小比较方法。", CorrectionStatus: "pending", RepracticeStatus: "not_assigned", CreatedAt: "2026-06-20T09:00:00+08:00", Knowledge: []string{"分数"}},
+		{ID: 2, StudentID: "stu_001", StudentName: "张三", ClassName: "六年级 3 班", SubmissionID: "sub_001", QuestionID: "q_015", QuestionNo: "15", QuestionType: "subjective", KnowledgePoint: "比例", ErrorType: "expression", WrongReason: "比例关系书写不规范", SourcePaper: "六年级数学期中卷", OriginalQuestion: "根据比例关系解决实际问题。", Score: 8, MaxScore: 10, CorrectAnswer: "设未知数并列比例求解，结果为 24 千克。", StudentAnswer: "3/5 = x/40，x = 24。", AnswerImageURL: "/mock/student-answer-q15.png", Explanation: "建模正确，补充规范比例式和单位说明。", CorrectionStatus: "pending", RepracticeStatus: "not_assigned", CreatedAt: "2026-06-20T09:10:00+08:00", Knowledge: []string{"比例"}},
+		{ID: 3, StudentID: "stu_002", StudentName: "李四", ClassName: "六年级 3 班", SubmissionID: "sub_002", QuestionID: "q_018", QuestionNo: "18", QuestionType: "subjective", KnowledgePoint: "几何面积", ErrorType: "calculation", WrongReason: "图形拆分后面积计算不完整", SourcePaper: "六年级数学期中卷", OriginalQuestion: "将组合图形拆分后计算总面积。", Score: 6, MaxScore: 8, CorrectAnswer: "长方形与三角形面积相加。", StudentAnswer: "长方形面积 36，三角形面积 12。", AnswerImageURL: "/mock/student-answer-q18.png", Explanation: "标出拆分依据并写完整单位。", CorrectionStatus: "pending", RepracticeStatus: "not_assigned", CreatedAt: "2026-06-20T09:20:00+08:00", Knowledge: []string{"几何面积"}},
+	}
+}
+
+func learningProfileFixture() LearningProfileResponse {
+	return LearningProfileResponse{
+		ClassName: "六年级 3 班",
+		KnowledgeMastery: []KnowledgeMastery{
+			{Name: "分数应用题", Mastery: 42, PreviousMastery: 38, Trend: 4, WrongCount: 29, StudentCount: 16},
+			{Name: "几何面积", Mastery: 51, PreviousMastery: 57, Trend: -6, WrongCount: 21, StudentCount: 13},
+			{Name: "比例换算", Mastery: 64, PreviousMastery: 59, Trend: 5, WrongCount: 15, StudentCount: 9},
+		},
+		StudentRisks: []StudentRisk{
+			{StudentName: "李四", Risk: "连续 3 次未提交作业", Weakness: []string{"分数应用题", "比例"}},
+			{StudentName: "赵六", Risk: "本次低于班均 18 分", Weakness: []string{"几何面积"}},
+		},
+		HomeworkWatch: []HomeworkWatch{
+			{StudentName: "李四", ClassName: "六年级 3 班", Missing: 3, Guardian: "李四家长"},
+			{StudentName: "赵六", ClassName: "六年级 3 班", Missing: 2, Guardian: "赵六家长"},
+		},
+	}
+}
+
+func guardianReportFixture(studentName string) GuardianReportResponse {
+	if studentName == "" {
+		studentName = "李四"
+	}
+	return GuardianReportResponse{StudentName: studentName, ClassName: "六年级 3 班", Summary: "本次成绩 72 分，共有 2 道题需要继续巩固。", Score: 72, WrongCount: 2, Weakness: []string{"分数", "几何面积"}, Actions: []string{"每天安排 15 分钟订正", "优先复习薄弱知识点", "完成再练后和孩子一起检查步骤"}}
 }

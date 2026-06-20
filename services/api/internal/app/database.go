@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,6 +151,7 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "submissions", column: "page_count", definition: "INT NOT NULL DEFAULT 0 AFTER file_url"},
 		{table: "submissions", column: "matched_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'matched' AFTER page_count"},
 		{table: "submissions", column: "graded_at", definition: "DATETIME NULL AFTER submitted_at"},
+		{table: "objective_review_exceptions", column: "suggested_score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER status"},
 		{table: "subjective_reviews", column: "review_stage", definition: "VARCHAR(40) NOT NULL DEFAULT 'first_review' AFTER status"},
 		{table: "subjective_reviews", column: "assignee_id", definition: "VARCHAR(40) DEFAULT '' AFTER review_stage"},
 		{table: "subjective_reviews", column: "priority", definition: "INT NOT NULL DEFAULT 0 AFTER assignee_id"},
@@ -158,10 +160,13 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "grading_history", column: "model_version", definition: "VARCHAR(80) DEFAULT '' AFTER review_stage"},
 		{table: "wrong_questions", column: "submission_id", definition: "VARCHAR(40) DEFAULT '' AFTER question_id"},
 		{table: "wrong_questions", column: "question_no", definition: "VARCHAR(20) DEFAULT '' AFTER submission_id"},
+		{table: "wrong_questions", column: "error_type", definition: "VARCHAR(40) NOT NULL DEFAULT 'other' AFTER knowledge_point"},
+		{table: "wrong_questions", column: "original_question", definition: "TEXT AFTER source_paper"},
 		{table: "wrong_questions", column: "score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER source_paper"},
 		{table: "wrong_questions", column: "max_score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER score"},
 		{table: "wrong_questions", column: "correct_answer", definition: "TEXT AFTER max_score"},
 		{table: "wrong_questions", column: "student_answer", definition: "TEXT AFTER correct_answer"},
+		{table: "wrong_questions", column: "answer_image_url", definition: "VARCHAR(255) DEFAULT '' AFTER student_answer"},
 		{table: "wrong_questions", column: "explanation", definition: "TEXT AFTER student_answer"},
 		{table: "wrong_questions", column: "correction_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER explanation"},
 		{table: "wrong_questions", column: "repractice_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'not_assigned' AFTER correction_status"},
@@ -468,10 +473,188 @@ func (s *Store) SaveScanWorkerResult(ctx context.Context, taskID string, req Sca
 	if affected == 0 {
 		return ScanJob{}, sql.ErrNoRows
 	}
+	if err := s.persistObjectiveResultsFromWorker(ctx, tx, taskID, req.Result); err != nil {
+		return ScanJob{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return ScanJob{}, err
 	}
 	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) persistObjectiveResultsFromWorker(ctx context.Context, tx *sql.Tx, taskID string, result map[string]any) error {
+	answers := workerOMRAnswers(result)
+	if len(answers) == 0 {
+		return nil
+	}
+	var templateID string
+	if err := tx.QueryRowContext(ctx, "SELECT template_id FROM scan_jobs WHERE id = ? LIMIT 1", taskID).Scan(&templateID); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT sub.id, COALESCE(sub.student_name, students.name)
+		FROM submissions sub
+		LEFT JOIN students ON students.id = sub.student_id
+		WHERE sub.scan_task_id = ?
+		ORDER BY sub.submitted_at ASC`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	submissions := []struct {
+		id          string
+		studentName string
+	}{}
+	for rows.Next() {
+		var item struct {
+			id          string
+			studentName string
+		}
+		if err := rows.Scan(&item.id, &item.studentName); err != nil {
+			return err
+		}
+		submissions = append(submissions, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(submissions) == 0 {
+		return nil
+	}
+	questionRows, err := tx.QueryContext(ctx, `
+		SELECT id, question_no, question_type, score, COALESCE(standard_answer, '')
+		FROM question_templates
+		WHERE template_id = ? AND question_type IN ('single_choice', 'choice', 'judge', 'fill_blank', 'objective')
+		ORDER BY CAST(question_no AS UNSIGNED), question_no`, templateID)
+	if err != nil {
+		return err
+	}
+	defer questionRows.Close()
+	questions := map[string]struct {
+		id     string
+		no     string
+		qtype  string
+		score  float64
+		answer string
+	}{}
+	for questionRows.Next() {
+		var item struct {
+			id     string
+			no     string
+			qtype  string
+			score  float64
+			answer string
+		}
+		if err := questionRows.Scan(&item.id, &item.no, &item.qtype, &item.score, &item.answer); err != nil {
+			return err
+		}
+		questions[item.no] = item
+	}
+	if err := questionRows.Err(); err != nil {
+		return err
+	}
+	for _, submission := range submissions {
+		for _, answer := range answers {
+			question, ok := questions[answer.QuestionNo]
+			if !ok {
+				continue
+			}
+			studentAnswer := strings.TrimSpace(answer.Selected)
+			correctAnswer := strings.TrimSpace(question.answer)
+			isCorrect := correctAnswer != "" && strings.EqualFold(studentAnswer, correctAnswer)
+			score := 0.0
+			if isCorrect {
+				score = question.score
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO objective_grades (submission_id, question_id, student_answer, correct_answer, score, max_score, is_correct, confidence)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				ON DUPLICATE KEY UPDATE
+					student_answer = VALUES(student_answer),
+					correct_answer = VALUES(correct_answer),
+					score = VALUES(score),
+					max_score = VALUES(max_score),
+					is_correct = VALUES(is_correct),
+					confidence = VALUES(confidence)`,
+				submission.id, question.id, studentAnswer, correctAnswer, score, question.score, isCorrect, answer.Confidence,
+			); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
+				VALUES (?, ?, ?, ?, ?, 'omr', 'final')
+				ON DUPLICATE KEY UPDATE score = VALUES(score), max_score = VALUES(max_score), source = VALUES(source), status = VALUES(status), updated_at = CURRENT_TIMESTAMP`,
+				submission.id, question.id, question.no, score, question.score,
+			); err != nil {
+				return err
+			}
+			if answer.Confidence < 80 || studentAnswer == "" {
+				reason := "低置信度客观题需人工确认"
+				if studentAnswer == "" {
+					reason = "未识别到客观题答案"
+				}
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO objective_review_exceptions (submission_id, question_id, question_no, student_answer, confidence, reason, status, suggested_score)
+					VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+					ON DUPLICATE KEY UPDATE student_answer = VALUES(student_answer), confidence = VALUES(confidence), reason = VALUES(reason), suggested_score = VALUES(suggested_score), updated_at = CURRENT_TIMESTAMP`,
+					submission.id, question.id, question.no, studentAnswer, answer.Confidence, reason, score,
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type workerOMRAnswer struct {
+	QuestionNo string
+	Selected   string
+	Confidence int
+}
+
+func workerOMRAnswers(result map[string]any) []workerOMRAnswer {
+	rawResults, ok := result["omrResults"].([]any)
+	if !ok {
+		return nil
+	}
+	answers := []workerOMRAnswer{}
+	for _, rawResult := range rawResults {
+		resultMap, ok := rawResult.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawAnswers, ok := resultMap["answers"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawAnswer := range rawAnswers {
+			answerMap, ok := rawAnswer.(map[string]any)
+			if !ok {
+				continue
+			}
+			answers = append(answers, workerOMRAnswer{
+				QuestionNo: fmt.Sprint(answerMap["questionNo"]),
+				Selected:   fmt.Sprint(answerMap["selected"]),
+				Confidence: numberToInt(answerMap["confidence"]),
+			})
+		}
+	}
+	return answers
+}
+
+func numberToInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case float64:
+		return int(typed)
+	case string:
+		parsed, _ := strconv.Atoi(typed)
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func (s *Store) ScanWorkerResult(ctx context.Context, taskID string) (ScanWorkerResultRecord, error) {
@@ -717,6 +900,219 @@ func (s *Store) WeakPoints(ctx context.Context) ([]KnowledgeStat, error) {
 	return stats, rows.Err()
 }
 
+func (s *Store) WrongQuestions(ctx context.Context, filters WrongQuestionFilters) ([]WrongQuestion, error) {
+	query := `
+		SELECT wq.id, wq.student_id, COALESCE(students.name, sub.student_name, ''), COALESCE(sub.class_name, classes.name, ''),
+			wq.submission_id, wq.question_id, wq.question_no, COALESCE(qt.question_type, ''), wq.knowledge_point,
+			COALESCE(wq.error_type, 'other'), wq.wrong_reason, wq.source_paper, COALESCE(wq.original_question, ''),
+			wq.score, wq.max_score, COALESCE(wq.correct_answer, ''), COALESCE(wq.student_answer, ''),
+			COALESCE(wq.answer_image_url, ''), COALESCE(wq.explanation, ''), wq.correction_status, wq.repractice_status, wq.created_at
+		FROM wrong_questions wq
+		LEFT JOIN submissions sub ON sub.id = wq.submission_id
+		LEFT JOIN students ON students.id = wq.student_id
+		LEFT JOIN classes ON classes.id = students.class_id
+		LEFT JOIN question_templates qt ON qt.id = wq.question_id
+		WHERE 1 = 1`
+	args := []any{}
+	if filters.Paper != "" {
+		query += " AND wq.source_paper = ?"
+		args = append(args, filters.Paper)
+	}
+	if filters.ClassName != "" {
+		query += " AND COALESCE(sub.class_name, classes.name, '') = ?"
+		args = append(args, filters.ClassName)
+	}
+	if filters.StudentName != "" {
+		query += " AND COALESCE(students.name, sub.student_name, '') = ?"
+		args = append(args, filters.StudentName)
+	}
+	if filters.Knowledge != "" {
+		query += " AND wq.knowledge_point = ?"
+		args = append(args, filters.Knowledge)
+	}
+	if filters.ErrorType != "" {
+		query += " AND wq.error_type = ?"
+		args = append(args, filters.ErrorType)
+	}
+	if filters.Search != "" {
+		query += " AND (wq.question_no LIKE ? OR wq.wrong_reason LIKE ? OR wq.source_paper LIKE ?)"
+		pattern := "%" + filters.Search + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+	query += " ORDER BY wq.updated_at DESC, wq.id DESC LIMIT 200"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WrongQuestion{}
+	for rows.Next() {
+		item, err := scanWrongQuestion(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) WrongQuestion(ctx context.Context, id int64) (WrongQuestion, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT wq.id, wq.student_id, COALESCE(students.name, sub.student_name, ''), COALESCE(sub.class_name, classes.name, ''),
+			wq.submission_id, wq.question_id, wq.question_no, COALESCE(qt.question_type, ''), wq.knowledge_point,
+			COALESCE(wq.error_type, 'other'), wq.wrong_reason, wq.source_paper, COALESCE(wq.original_question, ''),
+			wq.score, wq.max_score, COALESCE(wq.correct_answer, ''), COALESCE(wq.student_answer, ''),
+			COALESCE(wq.answer_image_url, ''), COALESCE(wq.explanation, ''), wq.correction_status, wq.repractice_status, wq.created_at
+		FROM wrong_questions wq
+		LEFT JOIN submissions sub ON sub.id = wq.submission_id
+		LEFT JOIN students ON students.id = wq.student_id
+		LEFT JOIN classes ON classes.id = students.class_id
+		LEFT JOIN question_templates qt ON qt.id = wq.question_id
+		WHERE wq.id = ?`, id)
+	return scanWrongQuestion(row)
+}
+
+func scanWrongQuestion(scanner interface{ Scan(...any) error }) (WrongQuestion, error) {
+	var item WrongQuestion
+	var createdAt time.Time
+	err := scanner.Scan(
+		&item.ID, &item.StudentID, &item.StudentName, &item.ClassName, &item.SubmissionID, &item.QuestionID,
+		&item.QuestionNo, &item.QuestionType, &item.KnowledgePoint, &item.ErrorType, &item.WrongReason,
+		&item.SourcePaper, &item.OriginalQuestion, &item.Score, &item.MaxScore, &item.CorrectAnswer,
+		&item.StudentAnswer, &item.AnswerImageURL, &item.Explanation, &item.CorrectionStatus,
+		&item.RepracticeStatus, &createdAt,
+	)
+	if err != nil {
+		return WrongQuestion{}, err
+	}
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	item.Knowledge = []string{item.KnowledgePoint}
+	return item, nil
+}
+
+func (s *Store) CreateRepracticeTask(ctx context.Context, req RepracticeTaskRequest) (RepracticeTaskResponse, error) {
+	if len(req.WrongQuestionIDs) == 0 {
+		return RepracticeTaskResponse{}, errors.New("wrongQuestionIds is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RepracticeTaskResponse{}, err
+	}
+	defer tx.Rollback()
+	knowledgeSet := map[string]bool{}
+	for _, id := range req.WrongQuestionIDs {
+		var knowledge string
+		if err := tx.QueryRowContext(ctx, "SELECT knowledge_point FROM wrong_questions WHERE id = ?", id).Scan(&knowledge); err != nil {
+			return RepracticeTaskResponse{}, err
+		}
+		knowledgeSet[knowledge] = true
+		if _, err := tx.ExecContext(ctx, "UPDATE wrong_questions SET repractice_status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+			return RepracticeTaskResponse{}, err
+		}
+	}
+	knowledge := make([]string, 0, len(knowledgeSet))
+	for item := range knowledgeSet {
+		knowledge = append(knowledge, item)
+	}
+	idsJSON, _ := json.Marshal(req.WrongQuestionIDs)
+	knowledgeJSON, _ := json.Marshal(knowledge)
+	taskID := fmt.Sprintf("repractice_%d", time.Now().UnixMilli())
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "错题订正与再练"
+	}
+	var dueAt any
+	if strings.TrimSpace(req.DueAt) != "" {
+		dueAt = req.DueAt
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO repractice_tasks (id, title, class_name, wrong_question_ids_json, knowledge_json, status, due_at)
+		VALUES (?, ?, '六年级 3 班', ?, ?, 'assigned', ?)`, taskID, title, string(idsJSON), string(knowledgeJSON), dueAt); err != nil {
+		return RepracticeTaskResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RepracticeTaskResponse{}, err
+	}
+	return RepracticeTaskResponse{Status: "created", TaskID: taskID, LinkedCount: len(req.WrongQuestionIDs), Knowledge: knowledge}, nil
+}
+
+func (s *Store) LearningProfile(ctx context.Context, className string) (LearningProfileResponse, error) {
+	if strings.TrimSpace(className) == "" {
+		className = "六年级 3 班"
+	}
+	response := LearningProfileResponse{ClassName: className, KnowledgeMastery: []KnowledgeMastery{}, StudentRisks: []StudentRisk{}, HomeworkWatch: []HomeworkWatch{}}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT knowledge_point, mastery, wrong_count, student_count
+		FROM knowledge_mastery_history
+		WHERE class_name = ? AND student_id = ''
+		ORDER BY knowledge_point, recorded_at DESC`, className)
+	if err != nil {
+		return LearningProfileResponse{}, err
+	}
+	defer rows.Close()
+	byName := map[string]int{}
+	for rows.Next() {
+		var name string
+		var mastery, wrongCount, studentCount int
+		if err := rows.Scan(&name, &mastery, &wrongCount, &studentCount); err != nil {
+			return LearningProfileResponse{}, err
+		}
+		index, exists := byName[name]
+		if !exists {
+			response.KnowledgeMastery = append(response.KnowledgeMastery, KnowledgeMastery{Name: name, Mastery: mastery, PreviousMastery: mastery, WrongCount: wrongCount, StudentCount: studentCount})
+			byName[name] = len(response.KnowledgeMastery) - 1
+			continue
+		}
+		if response.KnowledgeMastery[index].PreviousMastery == response.KnowledgeMastery[index].Mastery {
+			response.KnowledgeMastery[index].PreviousMastery = mastery
+			response.KnowledgeMastery[index].Trend = response.KnowledgeMastery[index].Mastery - mastery
+		}
+	}
+	if response.StudentRisks, err = s.StudentRisks(ctx); err != nil {
+		return LearningProfileResponse{}, err
+	}
+	if response.HomeworkWatch, err = s.HomeworkWatch(ctx); err != nil {
+		return LearningProfileResponse{}, err
+	}
+	return response, nil
+}
+
+func (s *Store) GuardianReport(ctx context.Context, studentName string) (GuardianReportResponse, error) {
+	if strings.TrimSpace(studentName) == "" {
+		studentName = "李四"
+	}
+	response := GuardianReportResponse{StudentName: studentName, Weakness: []string{}, Actions: []string{}}
+	_ = s.db.QueryRowContext(ctx, `SELECT class_name, score FROM exam_scores WHERE student_name = ? ORDER BY exam_at DESC LIMIT 1`, studentName).Scan(&response.ClassName, &response.Score)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT wq.knowledge_point
+		FROM wrong_questions wq
+		LEFT JOIN students ON students.id = wq.student_id
+		LEFT JOIN submissions sub ON sub.id = wq.submission_id
+		WHERE COALESCE(students.name, sub.student_name, '') = ?
+		ORDER BY wq.knowledge_point`, studentName)
+	if err != nil {
+		return GuardianReportResponse{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return GuardianReportResponse{}, err
+		}
+		response.Weakness = append(response.Weakness, item)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM wrong_questions wq
+		LEFT JOIN students ON students.id = wq.student_id
+		LEFT JOIN submissions sub ON sub.id = wq.submission_id
+		WHERE COALESCE(students.name, sub.student_name, '') = ?`, studentName).Scan(&response.WrongCount); err != nil {
+		return GuardianReportResponse{}, err
+	}
+	response.Summary = fmt.Sprintf("本次成绩 %.0f 分，共有 %d 道题需要继续巩固。", response.Score, response.WrongCount)
+	response.Actions = []string{"每天安排 15 分钟订正", "优先复习薄弱知识点", "完成再练后和孩子一起检查步骤"}
+	return response, nil
+}
+
 func (s *Store) HomeworkWatch(ctx context.Context) ([]HomeworkWatch, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT student_name, class_name, missing, guardian
@@ -735,6 +1131,25 @@ func (s *Store) HomeworkWatch(ctx context.Context) ([]HomeworkWatch, error) {
 		if err := rows.Scan(&item.StudentName, &item.ClassName, &item.Missing, &item.Guardian); err != nil {
 			return nil, err
 		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) StudentRisks(ctx context.Context) ([]StudentRisk, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT student_name, risk, weakness_json FROM student_risks ORDER BY updated_at DESC LIMIT 20")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []StudentRisk{}
+	for rows.Next() {
+		var item StudentRisk
+		var weaknessJSON string
+		if err := rows.Scan(&item.StudentName, &item.Risk, &weaknessJSON); err != nil {
+			return nil, err
+		}
+		decodeStringSlice(weaknessJSON, &item.Weakness)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -912,24 +1327,27 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 	}
 	if req.FinalScore < review.FullScore {
 		knowledgePoint := firstKnowledgePoint(review.KnowledgeJSON)
+		errorType := classifyErrorType(req.TeacherNote, req.FinalScore)
 		result, err := tx.ExecContext(ctx, `
 			UPDATE wrong_questions
 			SET student_id = ?,
 				question_no = ?,
 				knowledge_point = ?,
+				error_type = ?,
 				wrong_reason = ?,
 				source_paper = ?,
 				score = ?,
 				max_score = ?,
 				correct_answer = ?,
 				student_answer = ?,
+				answer_image_url = ?,
 				explanation = ?,
 				correction_status = 'pending',
 				repractice_status = 'not_assigned',
 				updated_at = CURRENT_TIMESTAMP
 			WHERE submission_id = ? AND question_id = ?`,
-			review.StudentID, review.QuestionNo, knowledgePoint, wrongReason(req, review.FullScore), review.PaperName,
-			req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, req.TeacherNote,
+			review.StudentID, review.QuestionNo, knowledgePoint, errorType, wrongReason(req, review.FullScore), review.PaperName,
+			req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, review.ImageURL, req.TeacherNote,
 			req.SubmissionID, req.QuestionID,
 		)
 		if err != nil {
@@ -942,14 +1360,16 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 		if affected == 0 {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO wrong_questions
-					(student_id, question_id, submission_id, question_no, knowledge_point, wrong_reason, source_paper, score, max_score, correct_answer, student_answer, explanation, correction_status, repractice_status)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'not_assigned')`,
-				review.StudentID, req.QuestionID, req.SubmissionID, review.QuestionNo, knowledgePoint, wrongReason(req, review.FullScore), review.PaperName,
-				req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, req.TeacherNote,
+					(student_id, question_id, submission_id, question_no, knowledge_point, error_type, wrong_reason, source_paper, score, max_score, correct_answer, student_answer, answer_image_url, explanation, correction_status, repractice_status)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'not_assigned')`,
+				review.StudentID, req.QuestionID, req.SubmissionID, review.QuestionNo, knowledgePoint, errorType, wrongReason(req, review.FullScore), review.PaperName,
+				req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, review.ImageURL, req.TeacherNote,
 			); err != nil {
 				return GradingDecisionResponse{}, err
 			}
 		}
+	} else if _, err := tx.ExecContext(ctx, "DELETE FROM wrong_questions WHERE submission_id = ? AND question_id = ?", req.SubmissionID, req.QuestionID); err != nil {
+		return GradingDecisionResponse{}, err
 	}
 	nextStatus := "reviewed"
 	if req.Decision == "second_review" {
@@ -1006,6 +1426,24 @@ func wrongReason(req GradingDecisionRequest, fullScore float64) string {
 		return "未得分，需订正"
 	}
 	return fmt.Sprintf("得分 %.1f/%.1f，需订正", req.FinalScore, fullScore)
+}
+
+func classifyErrorType(note string, score float64) string {
+	normalized := strings.TrimSpace(note)
+	switch {
+	case strings.Contains(normalized, "计算") || strings.Contains(normalized, "运算"):
+		return "calculation"
+	case strings.Contains(normalized, "审题") || strings.Contains(normalized, "题意"):
+		return "reading"
+	case strings.Contains(normalized, "表达") || strings.Contains(normalized, "单位") || strings.Contains(normalized, "书写"):
+		return "expression"
+	case strings.Contains(normalized, "概念") || strings.Contains(normalized, "公式"):
+		return "concept"
+	case score <= 0:
+		return "concept"
+	default:
+		return "other"
+	}
 }
 
 func (s *Store) ResetDemo(ctx context.Context) (DashboardResponse, error) {
@@ -1473,10 +1911,20 @@ func (s *Store) SaveTemplateQuestions(ctx context.Context, templateID string, qu
 
 func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, error) {
 	analytics := ClassroomAnalytics{
-		ClassName:      "六年级 3 班",
-		QuestionStats:  []QuestionStat{},
-		KnowledgeStats: []KnowledgeStat{},
-		StudentRisks:   []StudentRisk{},
+		ClassName:       "六年级 3 班",
+		QuestionStats:   []QuestionStat{},
+		QuestionDetails: []QuestionDetailStat{},
+		KnowledgeStats:  []KnowledgeStat{},
+		StudentRisks:    []StudentRisk{},
+		StudentScores:   []StudentScoreSummary{},
+		ScoreBands: []ScoreBand{
+			{Label: "0-59", Min: 0, Max: 59},
+			{Label: "60-69", Min: 60, Max: 69},
+			{Label: "70-79", Min: 70, Max: 79},
+			{Label: "80-89", Min: 80, Max: 89},
+			{Label: "90-100", Min: 90, Max: 100},
+		},
+		ObjectiveExceptions: []ObjectiveReviewException{},
 	}
 	var averageScore, highestScore, lowestScore sql.NullFloat64
 	if err := s.db.QueryRowContext(ctx, "SELECT AVG(score), MAX(score), MIN(score) FROM exam_scores WHERE class_name = ?", analytics.ClassName).Scan(&averageScore, &highestScore, &lowestScore); err != nil {
@@ -1491,6 +1939,35 @@ func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, err
 	if lowestScore.Valid {
 		analytics.LowestScore = lowestScore.Float64
 	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM students
+		JOIN classes ON classes.id = students.class_id
+		WHERE classes.name = ?`, analytics.ClassName).Scan(&analytics.StudentCount); err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM exam_scores WHERE class_name = ?", analytics.ClassName).Scan(&analytics.GradedCount); err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	if analytics.StudentCount > 0 {
+		analytics.CompletionRate = int(float64(analytics.GradedCount) / float64(analytics.StudentCount) * 100)
+	}
+	var passCount, excellentCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM exam_scores WHERE class_name = ? AND score >= 60", analytics.ClassName).Scan(&passCount); err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM exam_scores WHERE class_name = ? AND score >= 90", analytics.ClassName).Scan(&excellentCount); err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	if analytics.GradedCount > 0 {
+		analytics.PassRate = int(float64(passCount) / float64(analytics.GradedCount) * 100)
+		analytics.ExcellentRate = int(float64(excellentCount) / float64(analytics.GradedCount) * 100)
+	}
+	for index := range analytics.ScoreBands {
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM exam_scores WHERE class_name = ? AND score BETWEEN ? AND ?", analytics.ClassName, analytics.ScoreBands[index].Min, analytics.ScoreBands[index].Max).Scan(&analytics.ScoreBands[index].Count); err != nil {
+			return ClassroomAnalytics{}, err
+		}
+	}
 
 	questionRows, err := s.db.QueryContext(ctx, "SELECT question_no, accuracy, question_type FROM question_stats ORDER BY accuracy ASC")
 	if err != nil {
@@ -1503,6 +1980,15 @@ func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, err
 			return ClassroomAnalytics{}, err
 		}
 		analytics.QuestionStats = append(analytics.QuestionStats, item)
+		analytics.QuestionDetails = append(analytics.QuestionDetails, QuestionDetailStat{
+			No:             item.No,
+			Type:           item.Type,
+			Accuracy:       item.Accuracy,
+			ScoreRate:      item.Accuracy,
+			Difficulty:     difficultyLabel(item.Accuracy),
+			Discrimination: discriminationScore(item.Accuracy),
+			TypicalError:   typicalQuestionError(item.Type, item.Accuracy),
+		})
 	}
 
 	knowledge, err := s.WeakPoints(ctx)
@@ -1525,8 +2011,219 @@ func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, err
 		decodeStringSlice(weaknessJSON, &item.Weakness)
 		analytics.StudentRisks = append(analytics.StudentRisks, item)
 	}
+	scoreRows, err := s.db.QueryContext(ctx, `
+		SELECT student_name, class_name, score
+		FROM exam_scores
+		WHERE class_name = ?
+		ORDER BY score DESC, student_name ASC`, analytics.ClassName)
+	if err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	defer scoreRows.Close()
+	rank := 0
+	for scoreRows.Next() {
+		rank++
+		var item StudentScoreSummary
+		if err := scoreRows.Scan(&item.StudentName, &item.ClassName, &item.Score); err != nil {
+			return ClassroomAnalytics{}, err
+		}
+		item.Rank = rank
+		item.Weakness = studentWeaknessFromAnalytics(item.StudentName, analytics.StudentRisks, analytics.KnowledgeStats)
+		analytics.StudentScores = append(analytics.StudentScores, item)
+	}
+	exceptionRows, err := s.db.QueryContext(ctx, `
+		SELECT ex.id, ex.submission_id, COALESCE(sub.student_name, students.name, ''), ex.question_id, ex.question_no,
+			ex.student_answer, ex.confidence, ex.reason, ex.status, ex.suggested_score
+		FROM objective_review_exceptions ex
+		LEFT JOIN submissions sub ON sub.id = ex.submission_id
+		LEFT JOIN students ON students.id = sub.student_id
+		ORDER BY ex.updated_at DESC
+		LIMIT 20`)
+	if err != nil {
+		return ClassroomAnalytics{}, err
+	}
+	defer exceptionRows.Close()
+	for exceptionRows.Next() {
+		var item ObjectiveReviewException
+		if err := exceptionRows.Scan(&item.ID, &item.SubmissionID, &item.StudentName, &item.QuestionID, &item.QuestionNo, &item.Answer, &item.Confidence, &item.Reason, &item.Status, &item.SuggestedScore); err != nil {
+			return ClassroomAnalytics{}, err
+		}
+		analytics.ObjectiveExceptions = append(analytics.ObjectiveExceptions, item)
+	}
 
 	return analytics, nil
+}
+
+func (s *Store) GenerateExamScores(ctx context.Context, className string) (ScoreGenerationResponse, error) {
+	if strings.TrimSpace(className) == "" {
+		className = "六年级 3 班"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
+		SELECT og.submission_id, og.question_id, qt.question_no, og.score, og.max_score, 'omr', 'final'
+		FROM objective_grades og
+		JOIN question_templates qt ON qt.id = og.question_id
+		WHERE NOT EXISTS (
+			SELECT 1 FROM objective_review_exceptions ex
+			WHERE ex.submission_id = og.submission_id AND ex.question_id = og.question_id AND ex.status = 'pending'
+		)
+		ON DUPLICATE KEY UPDATE
+			score = VALUES(score),
+			max_score = VALUES(max_score),
+			source = VALUES(source),
+			status = VALUES(status),
+			updated_at = CURRENT_TIMESTAMP`); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT sub.id, COALESCE(sub.student_name, students.name), COALESCE(sub.class_name, classes.name), COALESCE(assignments.title, '未命名考试'), COALESCE(SUM(qs.score), 0)
+		FROM submissions sub
+		JOIN assignments ON assignments.id = sub.assignment_id
+		JOIN students ON students.id = sub.student_id
+		JOIN classes ON classes.id = students.class_id
+		LEFT JOIN question_scores qs ON qs.submission_id = sub.id
+		WHERE COALESCE(sub.class_name, classes.name) = ?
+		GROUP BY sub.id, sub.student_name, students.name, sub.class_name, classes.name, assignments.title`, className)
+	if err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	type generatedScoreRow struct {
+		SubmissionID string
+		StudentName  string
+		ClassName    string
+		PaperName    string
+		Score        float64
+	}
+	scoreData := []generatedScoreRow{}
+	for rows.Next() {
+		var item generatedScoreRow
+		if err := rows.Scan(&item.SubmissionID, &item.StudentName, &item.ClassName, &item.PaperName, &item.Score); err != nil {
+			rows.Close()
+			return ScoreGenerationResponse{}, err
+		}
+		scoreData = append(scoreData, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ScoreGenerationResponse{}, err
+	}
+	rows.Close()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wrong_questions
+			(student_id, question_id, submission_id, question_no, knowledge_point, error_type, wrong_reason, source_paper,
+			score, max_score, correct_answer, student_answer, answer_image_url, explanation, correction_status, repractice_status)
+		SELECT sub.student_id, og.question_id, og.submission_id, qt.question_no,
+			COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qt.knowledge_json, '$[0]')), '未归类'),
+			'concept', '客观题答案与标准答案不一致', assignments.title,
+			og.score, og.max_score, og.correct_answer, og.student_answer, COALESCE(sub.file_url, ''),
+			'核对标准答案并完成同知识点订正。', 'pending', 'not_assigned'
+		FROM objective_grades og
+		JOIN question_templates qt ON qt.id = og.question_id
+		JOIN submissions sub ON sub.id = og.submission_id
+		JOIN assignments ON assignments.id = sub.assignment_id
+		WHERE og.is_correct = FALSE
+			AND NOT EXISTS (
+				SELECT 1 FROM objective_review_exceptions ex
+				WHERE ex.submission_id = og.submission_id AND ex.question_id = og.question_id AND ex.status = 'pending'
+			)
+		ON DUPLICATE KEY UPDATE
+			student_id = VALUES(student_id), question_no = VALUES(question_no), knowledge_point = VALUES(knowledge_point),
+			error_type = VALUES(error_type), wrong_reason = VALUES(wrong_reason), source_paper = VALUES(source_paper),
+			score = VALUES(score), max_score = VALUES(max_score), correct_answer = VALUES(correct_answer),
+			student_answer = VALUES(student_answer), answer_image_url = VALUES(answer_image_url), explanation = VALUES(explanation),
+			correction_status = 'pending', updated_at = CURRENT_TIMESTAMP`); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	generated := 0
+	for _, item := range scoreData {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO exam_scores (student_name, class_name, paper_name, score, exam_at)
+			VALUES (?, ?, ?, ?, CURRENT_DATE())
+			ON DUPLICATE KEY UPDATE score = VALUES(score)`,
+			item.StudentName, item.ClassName, item.PaperName, item.Score,
+		); err != nil {
+			return ScoreGenerationResponse{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE submissions SET status = 'graded', graded_at = CURRENT_TIMESTAMP WHERE id = ?", item.SubmissionID); err != nil {
+			return ScoreGenerationResponse{}, err
+		}
+		generated++
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO knowledge_mastery_history (class_name, student_id, knowledge_point, mastery, wrong_count, student_count, recorded_at)
+		SELECT COALESCE(sub.class_name, classes.name), '',
+			COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qt.knowledge_json, '$[0]')), '未归类'),
+			ROUND(LEAST(100, GREATEST(0,
+				AVG(CASE WHEN qs.max_score > 0 THEN qs.score / qs.max_score ELSE 0 END) * 80
+				+ (1 - COUNT(wq.id) / GREATEST(COUNT(qs.id), 1)) * 20
+			))),
+			COUNT(wq.id), COUNT(DISTINCT sub.student_id), CURRENT_DATE()
+		FROM question_scores qs
+		JOIN submissions sub ON sub.id = qs.submission_id
+		JOIN students ON students.id = sub.student_id
+		JOIN classes ON classes.id = students.class_id
+		JOIN question_templates qt ON qt.id = qs.question_id
+		LEFT JOIN wrong_questions wq ON wq.submission_id = qs.submission_id AND wq.question_id = qs.question_id
+		WHERE COALESCE(sub.class_name, classes.name) = ?
+		GROUP BY COALESCE(sub.class_name, classes.name), COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qt.knowledge_json, '$[0]')), '未归类')
+		ON DUPLICATE KEY UPDATE mastery = VALUES(mastery), wrong_count = VALUES(wrong_count), student_count = VALUES(student_count)`, className); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	return ScoreGenerationResponse{Status: "generated", ClassName: className, Generated: generated}, nil
+}
+
+func difficultyLabel(accuracy int) string {
+	if accuracy < 50 {
+		return "偏难"
+	}
+	if accuracy < 75 {
+		return "中等"
+	}
+	return "容易"
+}
+
+func discriminationScore(accuracy int) int {
+	if accuracy < 45 {
+		return 62
+	}
+	if accuracy < 75 {
+		return 78
+	}
+	return 52
+}
+
+func typicalQuestionError(questionType string, accuracy int) string {
+	if accuracy >= 80 {
+		return "整体掌握较好，关注个别粗心"
+	}
+	if strings.Contains(questionType, "选择") || strings.Contains(questionType, "single") {
+		return "选项干扰识别不足"
+	}
+	return "关键步骤或知识点迁移不稳定"
+}
+
+func studentWeaknessFromAnalytics(studentName string, risks []StudentRisk, knowledge []KnowledgeStat) []string {
+	for _, risk := range risks {
+		if risk.StudentName == studentName && len(risk.Weakness) > 0 {
+			return risk.Weakness
+		}
+	}
+	result := []string{}
+	for index, item := range knowledge {
+		if index >= 2 {
+			break
+		}
+		result = append(result, item.Name)
+	}
+	return result
 }
 
 func insertTemplateQuestionTx(ctx context.Context, tx *sql.Tx, templateID string, question QuestionTemplate) error {

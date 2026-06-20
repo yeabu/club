@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +65,13 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("PUT /api/templates/{templateID}/regions/{regionID}", app.handleUpdateTemplateRegion)
 	mux.HandleFunc("DELETE /api/templates/{templateID}/regions/{regionID}", app.handleDeleteTemplateRegion)
 	mux.HandleFunc("GET /api/analytics/classroom", app.handleClassroomAnalytics)
+	mux.HandleFunc("POST /api/analytics/generate-scores", app.handleGenerateScores)
+	mux.HandleFunc("GET /api/analytics/export/scores.csv", app.handleExportScores)
+	mux.HandleFunc("GET /api/mistakes", app.handleWrongQuestions)
+	mux.HandleFunc("GET /api/mistakes/{mistakeID}", app.handleWrongQuestion)
+	mux.HandleFunc("POST /api/mistakes/repractice", app.handleCreateRepracticeTask)
+	mux.HandleFunc("GET /api/learning/profile", app.handleLearningProfile)
+	mux.HandleFunc("GET /api/reports/guardian", app.handleGuardianReport)
 	mux.HandleFunc("GET /api/dev/connections", app.handleDevConnections)
 	mux.HandleFunc("POST /api/dev/reset-demo", app.handleResetDemo)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(localUploadRoot()))))
@@ -922,6 +932,136 @@ func (app *App) handleClassroomAnalytics(w http.ResponseWriter, r *http.Request)
 		log.Printf("classroom analytics db query failed: %v", err)
 	}
 	writeJSON(w, http.StatusOK, analyticsFixture())
+}
+
+func (app *App) handleGenerateScores(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	className := strings.TrimSpace(r.URL.Query().Get("className"))
+	result, err := app.store.GenerateExamScores(r.Context(), className)
+	if err != nil {
+		log.Printf("generate scores failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "generate scores failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (app *App) handleExportScores(w http.ResponseWriter, r *http.Request) {
+	data := analyticsFixture()
+	if app.store != nil {
+		if dbData, err := app.store.ClassroomAnalytics(r.Context()); err == nil {
+			data = dbData
+		} else {
+			log.Printf("score export analytics query failed: %v", err)
+		}
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="scores.csv"`)
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"学生", "班级", "总分", "排名", "薄弱知识点"})
+	for _, item := range data.StudentScores {
+		_ = writer.Write([]string{
+			item.StudentName,
+			item.ClassName,
+			fmt.Sprintf("%.1f", item.Score),
+			fmt.Sprintf("%d", item.Rank),
+			strings.Join(item.Weakness, "、"),
+		})
+	}
+	writer.Flush()
+}
+
+func (app *App) handleWrongQuestions(w http.ResponseWriter, r *http.Request) {
+	filters := WrongQuestionFilters{
+		Paper:       strings.TrimSpace(r.URL.Query().Get("paper")),
+		ClassName:   strings.TrimSpace(r.URL.Query().Get("className")),
+		StudentName: strings.TrimSpace(r.URL.Query().Get("studentName")),
+		Knowledge:   strings.TrimSpace(r.URL.Query().Get("knowledge")),
+		ErrorType:   strings.TrimSpace(r.URL.Query().Get("errorType")),
+		Search:      strings.TrimSpace(r.URL.Query().Get("search")),
+	}
+	if app.store != nil {
+		items, err := app.store.WrongQuestions(r.Context(), filters)
+		if err == nil {
+			writeJSON(w, http.StatusOK, WrongQuestionListResponse{Items: items})
+			return
+		}
+		log.Printf("wrong questions query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, WrongQuestionListResponse{Items: wrongQuestionsFixture()})
+}
+
+func (app *App) handleWrongQuestion(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("mistakeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mistake id"})
+		return
+	}
+	if app.store != nil {
+		item, err := app.store.WrongQuestion(r.Context(), id)
+		if err == nil {
+			writeJSON(w, http.StatusOK, item)
+			return
+		}
+		if err != sql.ErrNoRows {
+			log.Printf("wrong question query failed: %v", err)
+		}
+	}
+	for _, item := range wrongQuestionsFixture() {
+		if item.ID == id {
+			writeJSON(w, http.StatusOK, item)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "mistake not found"})
+}
+
+func (app *App) handleCreateRepracticeTask(w http.ResponseWriter, r *http.Request) {
+	var req RepracticeTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.WrongQuestionIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wrongQuestionIds is required"})
+		return
+	}
+	if app.store != nil {
+		result, err := app.store.CreateRepracticeTask(r.Context(), req)
+		if err == nil {
+			writeJSON(w, http.StatusCreated, result)
+			return
+		}
+		log.Printf("repractice task create failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "repractice task create failed"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, RepracticeTaskResponse{Status: "created", TaskID: fmt.Sprintf("repractice_%d", time.Now().UnixMilli()), LinkedCount: len(req.WrongQuestionIDs), Knowledge: []string{}})
+}
+
+func (app *App) handleLearningProfile(w http.ResponseWriter, r *http.Request) {
+	className := strings.TrimSpace(r.URL.Query().Get("className"))
+	if app.store != nil {
+		data, err := app.store.LearningProfile(r.Context(), className)
+		if err == nil {
+			writeJSON(w, http.StatusOK, data)
+			return
+		}
+		log.Printf("learning profile query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, learningProfileFixture())
+}
+
+func (app *App) handleGuardianReport(w http.ResponseWriter, r *http.Request) {
+	studentName := strings.TrimSpace(r.URL.Query().Get("studentName"))
+	if app.store != nil {
+		data, err := app.store.GuardianReport(r.Context(), studentName)
+		if err == nil {
+			writeJSON(w, http.StatusOK, data)
+			return
+		}
+		log.Printf("guardian report query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, guardianReportFixture(studentName))
 }
 
 func (app *App) handleDevConnections(w http.ResponseWriter, r *http.Request) {

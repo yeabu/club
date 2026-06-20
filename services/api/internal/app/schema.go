@@ -288,6 +288,21 @@ var schemaStatements = []string{
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_objective_grades_submission_question (submission_id, question_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS objective_review_exceptions (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		submission_id VARCHAR(40) NOT NULL,
+		question_id VARCHAR(40) NOT NULL,
+		question_no VARCHAR(20) NOT NULL,
+		student_answer VARCHAR(255) DEFAULT '',
+		confidence INT NOT NULL DEFAULT 0,
+		reason VARCHAR(255) NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		suggested_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_objective_exception_submission_question (submission_id, question_id),
+		INDEX idx_objective_exception_status (status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS subjective_reviews (
 		id VARCHAR(40) PRIMARY KEY,
 		submission_id VARCHAR(40) NOT NULL,
@@ -359,12 +374,15 @@ var schemaStatements = []string{
 		submission_id VARCHAR(40) DEFAULT '',
 		question_no VARCHAR(20) DEFAULT '',
 		knowledge_point VARCHAR(100) NOT NULL,
+		error_type VARCHAR(40) NOT NULL DEFAULT 'other',
 		wrong_reason VARCHAR(255) NOT NULL,
 		source_paper VARCHAR(120) NOT NULL,
+		original_question TEXT,
 		score DECIMAL(6,2) NOT NULL DEFAULT 0,
 		max_score DECIMAL(6,2) NOT NULL DEFAULT 0,
 		correct_answer TEXT,
 		student_answer TEXT,
+		answer_image_url VARCHAR(255) DEFAULT '',
 		explanation TEXT,
 		correction_status VARCHAR(30) NOT NULL DEFAULT 'pending',
 		repractice_status VARCHAR(30) NOT NULL DEFAULT 'not_assigned',
@@ -374,6 +392,28 @@ var schemaStatements = []string{
 		UNIQUE KEY uk_wrong_question_submission_question (submission_id, question_id),
 		INDEX idx_wrong_student (student_id),
 		INDEX idx_wrong_knowledge (knowledge_point)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS repractice_tasks (
+		id VARCHAR(40) PRIMARY KEY,
+		title VARCHAR(120) NOT NULL,
+		class_name VARCHAR(100) DEFAULT '',
+		wrong_question_ids_json JSON NOT NULL,
+		knowledge_json JSON NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'assigned',
+		due_at DATETIME NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS knowledge_mastery_history (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		class_name VARCHAR(100) NOT NULL,
+		student_id VARCHAR(40) DEFAULT '',
+		knowledge_point VARCHAR(100) NOT NULL,
+		mastery INT NOT NULL,
+		wrong_count INT NOT NULL DEFAULT 0,
+		student_count INT NOT NULL DEFAULT 0,
+		recorded_at DATE NOT NULL,
+		UNIQUE KEY uk_mastery_scope_date (class_name, student_id, knowledge_point, recorded_at),
+		INDEX idx_mastery_knowledge (knowledge_point, recorded_at)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS object_files (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -537,9 +577,24 @@ var seedStatements = []string{
 	`INSERT IGNORE INTO objective_grades (submission_id, question_id, student_answer, correct_answer, score, max_score, is_correct, confidence) VALUES
 		('sub_001', 'q_001', 'A', 'A', 2, 2, TRUE, 98),
 		('sub_002', 'q_001', 'B', 'A', 0, 2, FALSE, 94)`,
+	`INSERT IGNORE INTO objective_review_exceptions (submission_id, question_id, question_no, student_answer, confidence, reason, status, suggested_score) VALUES
+		('sub_002', 'q_001', '1', 'B', 68, '低置信度且答案与标准答案不一致', 'pending', 0)`,
 	`INSERT IGNORE INTO subjective_reviews (id, submission_id, question_id, paper_name, student_name, class_name, question_no, full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text, student_image_url, ai_score, ai_reason, ai_comments_json, confidence, status) VALUES
 		('review_001', 'sub_001', 'q_015', '六年级数学期中卷', '张三', '六年级 3 班', '15', 10, '先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。答：需要 24 千克。', JSON_ARRAY('正确设未知数 2 分', '列出比例关系 4 分', '计算过程正确 2 分', '结果与答语完整 2 分'), JSON_ARRAY('比例', '应用题建模', '方程求解'), '设需要 x 千克，3/5 = x/40，5x = 120，x = 24。答需要 24 千克。', '/mock/student-answer-q15.png', 8, '建模和计算结果正确，但比例式书写不够规范，缺少单位换算说明。', JSON_ARRAY('核心步骤完整', '建议扣除书写规范 1 分', '答语完整，可保留 1 分'), 86, 'pending'),
 		('review_002', 'sub_002', 'q_018', '六年级数学期中卷', '李四', '六年级 3 班', '18', 8, '根据面积公式拆分图形并计算。', JSON_ARRAY('图形拆分正确 3 分', '公式使用正确 3 分', '计算结果正确 2 分'), JSON_ARRAY('几何面积'), '把图形看成长方形和三角形，长方形面积 36，三角形面积 12，总面积 48。', '/mock/student-answer-q18.png', 6, '思路基本正确，但少写一个关键单位，图形拆分说明不完整。', JSON_ARRAY('公式基本正确', '拆分依据需要补充', '建议教师复核单位'), 78, 'pending')`,
+	`INSERT IGNORE INTO wrong_questions
+		(student_id, question_id, submission_id, question_no, knowledge_point, error_type, wrong_reason, source_paper, original_question, score, max_score, correct_answer, student_answer, answer_image_url, explanation, correction_status, repractice_status)
+	VALUES
+		('stu_002', 'q_001', 'sub_002', '1', '分数', 'concept', '标准答案为 A，学生选择 B', '六年级数学期中卷', '比较两个分数的大小，选择正确答案。', 0, 2, 'A', 'B', '/mock/student-answer-q18.png', '回顾分数大小比较方法。', 'pending', 'not_assigned'),
+		('stu_001', 'q_015', 'sub_001', '15', '比例', 'expression', '比例关系书写不规范', '六年级数学期中卷', '根据比例关系解决实际问题。', 8, 10, '设未知数并列比例求解，结果为 24 千克。', '3/5 = x/40，x = 24。', '/mock/student-answer-q15.png', '建模正确，补充规范比例式和单位说明。', 'pending', 'not_assigned'),
+		('stu_002', 'q_018', 'sub_002', '18', '几何面积', 'calculation', '图形拆分后面积计算不完整', '六年级数学期中卷', '将组合图形拆分后计算总面积。', 6, 8, '长方形与三角形面积相加。', '长方形面积 36，三角形面积 12。', '/mock/student-answer-q18.png', '标出拆分依据并写完整单位。', 'pending', 'not_assigned')`,
+	`INSERT IGNORE INTO knowledge_mastery_history (class_name, student_id, knowledge_point, mastery, wrong_count, student_count, recorded_at) VALUES
+		('六年级 3 班', '', '分数应用题', 38, 32, 18, '2026-05-01'),
+		('六年级 3 班', '', '分数应用题', 42, 29, 16, '2026-06-01'),
+		('六年级 3 班', '', '几何面积', 57, 24, 14, '2026-05-01'),
+		('六年级 3 班', '', '几何面积', 51, 21, 13, '2026-06-01'),
+		('六年级 3 班', '', '比例换算', 59, 18, 11, '2026-05-01'),
+		('六年级 3 班', '', '比例换算', 64, 15, 9, '2026-06-01')`,
 	`INSERT IGNORE INTO exam_scores (student_name, class_name, paper_name, score, exam_at) VALUES
 		('张三', '六年级 3 班', '六年级数学期中卷', 85, '2026-06-01'),
 		('李四', '六年级 3 班', '六年级数学期中卷', 72, '2026-06-01'),
