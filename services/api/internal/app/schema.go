@@ -43,21 +43,24 @@ var schemaStatements = []string{
 		name VARCHAR(120) NOT NULL,
 		subject VARCHAR(40) NOT NULL,
 		grade VARCHAR(40) NOT NULL,
-		question_count INT NOT NULL,
-		total_score INT NOT NULL,
-		source_file_url VARCHAR(255) DEFAULT '',
-		status VARCHAR(30) NOT NULL DEFAULT 'ready',
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+			question_count INT NOT NULL,
+			total_score INT NOT NULL,
+			source_file_url VARCHAR(255) DEFAULT '',
+			status VARCHAR(30) NOT NULL DEFAULT 'draft',
+			version INT NOT NULL DEFAULT 1,
+			parent_id VARCHAR(40) DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS question_templates (
 		id VARCHAR(40) PRIMARY KEY,
 		template_id VARCHAR(40) NOT NULL,
 		question_no VARCHAR(20) NOT NULL,
 		question_type VARCHAR(40) NOT NULL,
-		score DECIMAL(6,2) NOT NULL,
-		standard_answer TEXT,
-		knowledge_json JSON NOT NULL,
+			score DECIMAL(6,2) NOT NULL,
+			standard_answer TEXT,
+			scoring_rules_json JSON NULL,
+			knowledge_json JSON NOT NULL,
 		page_no INT NOT NULL,
 		x INT NOT NULL,
 		y INT NOT NULL,
@@ -81,11 +84,28 @@ var schemaStatements = []string{
 		id VARCHAR(40) PRIMARY KEY,
 		title VARCHAR(120) NOT NULL,
 		class_name VARCHAR(100) NOT NULL,
+		template_id VARCHAR(40) DEFAULT '',
+		template_version INT NOT NULL DEFAULT 1,
 		pages INT NOT NULL,
+		notes TEXT,
+		files_json JSON NULL,
 		status VARCHAR(60) NOT NULL,
 		progress INT NOT NULL DEFAULT 0,
+		failure_reason TEXT,
+		retry_count INT NOT NULL DEFAULT 0,
+		queue_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		queue_message VARCHAR(255) DEFAULT '',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS scan_task_logs (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		task_id VARCHAR(40) NOT NULL,
+		file_key VARCHAR(255) DEFAULT '',
+		action VARCHAR(40) NOT NULL,
+		message VARCHAR(255) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_scan_task_logs_task (task_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS submissions (
 		id VARCHAR(40) PRIMARY KEY,
@@ -186,6 +206,11 @@ var schemaStatements = []string{
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 }
 
+var schemaPatchStatements = []string{
+	`ALTER TABLE paper_templates MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'draft'`,
+	`UPDATE paper_templates SET status = 'published' WHERE status = 'ready'`,
+}
+
 var seedStatements = []string{
 	`INSERT IGNORE INTO schools (id, name) VALUES ('school_001', '示范学校')`,
 	`INSERT IGNORE INTO classes (id, school_id, name, grade) VALUES ('class_603', 'school_001', '六年级 3 班', '六年级')`,
@@ -198,18 +223,43 @@ var seedStatements = []string{
 		('kp_001', '分数应用题', '数学'),
 		('kp_002', '几何面积', '数学'),
 		('kp_003', '比例换算', '数学')`,
-	`INSERT IGNORE INTO paper_templates (id, name, subject, grade, question_count, total_score, status) VALUES
-		('tpl_001', '六年级数学期中卷', '数学', '六年级', 25, 100, 'ready')`,
-	`INSERT IGNORE INTO question_templates (id, template_id, question_no, question_type, score, standard_answer, knowledge_json, page_no, x, y, width, height) VALUES
-		('q_001', 'tpl_001', '1', 'single_choice', 2, 'A', JSON_ARRAY('分数'), 1, 120, 260, 480, 80),
-		('q_015', 'tpl_001', '15', 'subjective', 10, '先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。答：需要 24 千克。', JSON_ARRAY('比例', '应用题建模'), 2, 96, 420, 620, 180),
-		('q_018', 'tpl_001', '18', 'subjective', 8, '根据面积公式拆分图形并计算。', JSON_ARRAY('几何面积'), 2, 110, 640, 600, 160)`,
+	`INSERT INTO paper_templates (id, name, subject, grade, question_count, total_score, source_file_url, status, version, parent_id) VALUES
+		('tpl_001', '六年级数学期中卷', '数学', '六年级', 25, 100, '/mock/templates/tpl_001-blank-paper.pdf', 'published', 1, '')
+		ON DUPLICATE KEY UPDATE
+			name = VALUES(name),
+			subject = VALUES(subject),
+			grade = VALUES(grade),
+			question_count = VALUES(question_count),
+			total_score = VALUES(total_score),
+			source_file_url = VALUES(source_file_url),
+			status = VALUES(status),
+			version = VALUES(version),
+			parent_id = VALUES(parent_id)`,
+	`INSERT IGNORE INTO question_templates (id, template_id, question_no, question_type, score, standard_answer, scoring_rules_json, knowledge_json, page_no, x, y, width, height) VALUES
+		('q_001', 'tpl_001', '1', 'single_choice', 2, 'A', JSON_ARRAY('选对 A 得 2 分'), JSON_ARRAY('分数'), 1, 120, 260, 480, 80),
+		('q_015', 'tpl_001', '15', 'subjective', 10, '先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。答：需要 24 千克。', JSON_ARRAY('正确设未知数 2 分', '列出比例关系 4 分', '计算过程正确 2 分', '结果与答语完整 2 分'), JSON_ARRAY('比例', '应用题建模'), 2, 96, 420, 620, 180),
+		('q_018', 'tpl_001', '18', 'subjective', 8, '根据面积公式拆分图形并计算。', JSON_ARRAY('拆分图形 2 分', '公式正确 2 分', '计算正确 3 分', '单位完整 1 分'), JSON_ARRAY('几何面积'), 2, 110, 640, 600, 160)
+		ON DUPLICATE KEY UPDATE
+			question_no = VALUES(question_no),
+			question_type = VALUES(question_type),
+			score = VALUES(score),
+			standard_answer = VALUES(standard_answer),
+			scoring_rules_json = VALUES(scoring_rules_json),
+			knowledge_json = VALUES(knowledge_json),
+			page_no = VALUES(page_no),
+			x = VALUES(x),
+			y = VALUES(y),
+			width = VALUES(width),
+			height = VALUES(height)`,
 	`INSERT IGNORE INTO assignments (id, title, class_name, template_id, due_at, status) VALUES
 		('assign_001', '六年级数学期中卷', '六年级 3 班', 'tpl_001', NOW() + INTERVAL 1 DAY, 'open')`,
-	`INSERT IGNORE INTO scan_jobs (id, title, class_name, pages, status, progress) VALUES
-		('scan_001', '六年级数学期中卷', '六年级 3 班', 96, 'OCR 识别中', 68),
-		('scan_002', '分数应用题专项', '六年级 1 班', 42, '等待 OMR', 32),
-		('scan_003', '几何面积小测', '五年级 2 班', 48, '待导入', 0)`,
+	`INSERT INTO scan_jobs (id, title, class_name, template_id, template_version, pages, status, progress) VALUES
+		('scan_001', '六年级数学期中卷', '六年级 3 班', 'tpl_001', 1, 96, 'OCR 识别中', 68),
+		('scan_002', '分数应用题专项', '六年级 1 班', 'tpl_001', 1, 42, '等待 OMR', 32),
+		('scan_003', '几何面积小测', '五年级 2 班', 'tpl_001', 1, 48, '待导入', 0)
+		ON DUPLICATE KEY UPDATE
+			template_id = VALUES(template_id),
+			template_version = VALUES(template_version)`,
 	`INSERT IGNORE INTO submissions (id, assignment_id, student_id, file_url, status) VALUES
 		('sub_001', 'assign_001', 'stu_001', '/mock/student-answer-q15.png', 'graded'),
 		('sub_002', 'assign_001', 'stu_002', '/mock/student-answer-q18.png', 'uploaded')`,

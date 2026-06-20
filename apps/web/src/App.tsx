@@ -1,16 +1,22 @@
 import {
+  AlertCircle,
   Bell,
   BookOpenCheck,
   Check,
   ClipboardCheck,
+  Cloud,
+  Database,
   FileStack,
   LayoutDashboard,
+  Loader2,
   MessageSquareText,
   PenLine,
+  RefreshCw,
   ScanLine,
   Send,
   SlidersHorizontal,
   Sparkles,
+  ShieldCheck,
   UsersRound
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -26,9 +32,61 @@ type ScanJob = {
   id: string;
   title: string;
   className: string;
+  templateId?: string;
+  templateVersion?: number;
   pages: number;
+  notes?: string;
   status: string;
   progress: number;
+  failureReason?: string;
+  retryCount: number;
+  queueStatus?: string;
+  queueMessage?: string;
+  files?: ScanUploadFile[];
+};
+
+type ScanUploadFile = {
+  key: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  url: string;
+  page?: number;
+  status?: string;
+  failureReason?: string;
+  studentId?: string;
+  studentName?: string;
+  matchStatus?: string;
+  matchMethod?: string;
+};
+
+type ScanUploadResponse = {
+  files: ScanUploadFile[];
+};
+
+type ScanTaskResponse = {
+  status: string;
+  queueId?: string;
+  queueError?: string;
+  task: ScanJob;
+};
+
+type ScanTaskListResponse = {
+  tasks: ScanJob[];
+};
+
+type TemplateAISuggestionResponse = {
+  paperName: string;
+  questionCount: number;
+  totalScore: number;
+  suggestedQuestions: QuestionTemplate[];
+  reviewRequired: boolean;
+  source: string;
+};
+
+type ScanTaskPreviewResponse = {
+  task: ScanJob;
+  files: ScanUploadFile[];
 };
 
 type ReviewItem = {
@@ -54,6 +112,7 @@ type HomeworkWatch = {
 };
 
 type DashboardData = {
+  source?: "database" | "fixtures" | "local";
   metrics: Metric[];
   scanQueue: ScanJob[];
   reviewQueue: ReviewItem[];
@@ -94,6 +153,17 @@ type GradingDecisionResponse = {
   nextReview?: SubjectiveData;
 };
 
+type TemplateMutationResponse = {
+  status: string;
+  template: PaperTemplate;
+};
+
+type TemplateRegionMutationResponse = {
+  status: string;
+  question: QuestionTemplate;
+  template: PaperTemplate;
+};
+
 type Region = {
   page: number;
   x: number;
@@ -107,6 +177,8 @@ type QuestionTemplate = {
   no: string;
   type: string;
   score: number;
+  standardAnswer?: string;
+  scoringRules?: string[];
   knowledge: string[];
   region: Region;
 };
@@ -118,6 +190,10 @@ type PaperTemplate = {
   grade: string;
   questionCount: number;
   totalScore: number;
+  sourceFileUrl?: string;
+  status?: TemplateStatus | "ready";
+  version?: number;
+  parentId?: string;
   questions: QuestionTemplate[];
 };
 
@@ -146,6 +222,30 @@ type ClassroomAnalytics = {
 type ActiveView = "workspace" | "scan" | "templates" | "grading" | "mistakes" | "analytics";
 type Overlay = "filter" | "notifications" | null;
 type TemplateTool = "objective" | "subjective" | "choice" | "judge";
+type TemplateStatus = "draft" | "published" | "disabled";
+type RequestStatus = "loading" | "processing" | "success" | "error" | "empty";
+type ConnectionStatus = "checking" | "available" | "unavailable" | "skipped";
+type UserRole = "teacher" | "researcher" | "admin" | "student" | "guardian";
+type Permission =
+  | "scan:create"
+  | "template:edit"
+  | "template:delete"
+  | "template:ai"
+  | "grading:review"
+  | "grading:decide"
+  | "mistake:generate"
+  | "guardian:remind";
+
+type Option = {
+  label: string;
+  value: string;
+};
+
+type RequestState = {
+  status: RequestStatus;
+  message: string;
+  detail?: string;
+};
 
 type CanvasRegion = {
   id: string;
@@ -154,6 +254,10 @@ type CanvasRegion = {
   label: string;
   color: string;
   borderStyle: "solid" | "dashed" | "dotted";
+  score: number;
+  standardAnswer: string;
+  scoringRules: string[];
+  knowledge: string[];
   region: Region;
 };
 
@@ -200,11 +304,61 @@ const templateTools: Record<TemplateTool, { label: string; color: string }> = {
   judge: { label: "判断题", color: "#b97809" }
 };
 
+const templateStatusLabels: Record<TemplateStatus, string> = {
+  draft: "草稿",
+  published: "已发布",
+  disabled: "停用"
+};
+
 const canvasPresets: CanvasSize[] = [
   { label: "A4 空白卷", width: 760, height: 1080 },
   { label: "答题卡", width: 760, height: 900 },
   { label: "横向试卷", width: 1080, height: 760 }
 ];
+
+const roleConfig: Record<UserRole, { label: string; description: string; views: ActiveView[]; permissions: Permission[] }> = {
+  teacher: {
+    label: "教师",
+    description: "批阅、导入、模板和班级学情",
+    views: ["workspace", "scan", "templates", "grading", "mistakes", "analytics"],
+    permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
+  },
+  researcher: {
+    label: "教研",
+    description: "模板、错题和学情分析",
+    views: ["workspace", "templates", "mistakes", "analytics"],
+    permissions: ["template:edit", "template:ai", "mistake:generate"]
+  },
+  admin: {
+    label: "管理员",
+    description: "全部入口和维护操作",
+    views: ["workspace", "scan", "templates", "grading", "mistakes", "analytics"],
+    permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
+  },
+  student: {
+    label: "学生",
+    description: "成绩、错题和个人学情",
+    views: ["workspace", "mistakes", "analytics"],
+    permissions: []
+  },
+  guardian: {
+    label: "家长",
+    description: "完成情况、错题和薄弱点",
+    views: ["workspace", "mistakes", "analytics"],
+    permissions: []
+  }
+};
+
+const navItems = [
+  { view: "workspace", label: "工作台", icon: LayoutDashboard },
+  { view: "scan", label: "扫描导入", icon: ScanLine },
+  { view: "templates", label: "试卷模板", icon: FileStack },
+  { view: "grading", label: "阅卷中心", icon: ClipboardCheck },
+  { view: "mistakes", label: "错题集", icon: BookOpenCheck },
+  { view: "analytics", label: "学情分析", icon: UsersRound }
+] satisfies Array<{ view: ActiveView; label: string; icon: typeof LayoutDashboard }>;
+
+const pageSize = 4;
 
 const fallbackPaperSources: TemplatePaperSource[] = [
   {
@@ -238,8 +392,13 @@ const fallbackPaperSources: TemplatePaperSource[] = [
 
 const templateDraftStorageKey = "club.templateDrafts";
 const templateLibraryStorageKey = "club.templateLibrary";
+const maxScanFileSizeBytes = 25 * 1024 * 1024;
+const maxScanFileCount = 20;
+const allowedScanExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".zip"];
+const allowedScanMimeTypes = ["application/pdf", "image/png", "image/jpeg", "image/webp", "application/zip", "application/x-zip-compressed"];
 
 const fallbackDashboard: DashboardData = {
+  source: "local",
   metrics: [
     { label: "待批试卷", value: "128", delta: "较昨日 +24", tone: "primary" },
     { label: "主观题待复核", value: "36", delta: "AI 已预评分", tone: "warning" },
@@ -247,9 +406,15 @@ const fallbackDashboard: DashboardData = {
     { label: "班级平均分", value: "81.6", delta: "较上次 +3.2", tone: "success" }
   ],
   scanQueue: [
-    { id: "scan_001", title: "六年级数学期中卷", className: "六年级 3 班", pages: 96, status: "OCR 识别中", progress: 68 },
-    { id: "scan_002", title: "分数应用题专项", className: "六年级 1 班", pages: 42, status: "等待 OMR", progress: 32 },
-    { id: "scan_003", title: "几何面积小测", className: "五年级 2 班", pages: 48, status: "待导入", progress: 0 }
+    { id: "scan_001", title: "六年级数学期中卷", className: "六年级 3 班", templateId: "tpl_001", templateVersion: 1, pages: 96, status: "OCR 识别中", progress: 68, retryCount: 0, queueStatus: "queued", files: [
+      { key: "mock/scan_001/zhangsan.png", fileName: "张三-第1页.png", contentType: "image/png", size: 204800, url: "/mock/student-answer-q15.png", page: 1, status: "识别中", studentId: "stu_001", studentName: "张三", matchStatus: "matched", matchMethod: "name" }
+    ] },
+    { id: "scan_002", title: "分数应用题专项", className: "六年级 1 班", templateId: "tpl_001", templateVersion: 1, pages: 42, status: "等待 OMR", progress: 32, retryCount: 0, queueStatus: "queued", files: [
+      { key: "mock/scan_002/unmatched.png", fileName: "未匹配-第1页.png", contentType: "image/png", size: 178200, url: "/mock/student-answer-q18.png", page: 1, status: "等待 OMR", matchStatus: "pending" }
+    ] },
+    { id: "scan_003", title: "几何面积小测", className: "五年级 2 班", templateId: "tpl_001", templateVersion: 1, pages: 48, status: "待导入", progress: 0, failureReason: "OCR Worker 暂未消费", retryCount: 1, queueStatus: "failed", files: [
+      { key: "mock/scan_003/error.png", fileName: "赵六-第1页.png", contentType: "image/png", size: 192000, url: "/mock/student-answer-q18.png", page: 1, status: "失败", failureReason: "识别超时", matchStatus: "pending" }
+    ] }
   ],
   reviewQueue: [
     { id: "review_001", studentName: "张三", paperName: "六年级数学期中卷", questionNo: "15", aiAdvice: "8 / 10", confidence: 86 },
@@ -301,9 +466,42 @@ const fallbackTemplates: PaperTemplate[] = [
     grade: "六年级",
     questionCount: 25,
     totalScore: 100,
+    sourceFileUrl: "/mock/templates/tpl_001-blank-paper.pdf",
+    status: "published",
+    version: 1,
     questions: [
-      { id: "q_001", no: "1", type: "single_choice", score: 2, knowledge: ["分数"], region: { page: 1, x: 120, y: 260, width: 480, height: 80 } },
-      { id: "q_015", no: "15", type: "subjective", score: 10, knowledge: ["比例", "应用题建模"], region: { page: 2, x: 96, y: 420, width: 620, height: 180 } }
+      { id: "q_001", no: "1", type: "single_choice", score: 2, standardAnswer: "A", scoringRules: ["选对 A 得 2 分"], knowledge: ["分数"], region: { page: 1, x: 120, y: 260, width: 480, height: 80 } },
+      { id: "q_015", no: "15", type: "subjective", score: 10, standardAnswer: "先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。", scoringRules: ["正确设未知数 2 分", "列出比例关系 4 分", "计算过程正确 2 分", "结果与答语完整 2 分"], knowledge: ["比例", "应用题建模"], region: { page: 2, x: 96, y: 420, width: 620, height: 180 } }
+    ]
+  },
+  {
+    id: "tpl_draft_001",
+    name: "六年级数学期中卷 v2",
+    subject: "数学",
+    grade: "六年级",
+    questionCount: 2,
+    totalScore: 12,
+    sourceFileUrl: "/mock/templates/tpl_001-blank-paper.pdf",
+    status: "draft",
+    version: 2,
+    parentId: "tpl_001",
+    questions: [
+      { id: "q_draft_001", no: "1", type: "single_choice", score: 2, standardAnswer: "A", scoringRules: ["选对得分"], knowledge: ["分数"], region: { page: 1, x: 130, y: 260, width: 460, height: 80 } },
+      { id: "q_draft_015", no: "15", type: "subjective", score: 10, standardAnswer: "按比例关系列式求解。", scoringRules: ["列式 4 分", "计算 4 分", "答语 2 分"], knowledge: ["比例"], region: { page: 2, x: 96, y: 420, width: 620, height: 180 } }
+    ]
+  },
+  {
+    id: "tpl_disabled_001",
+    name: "旧版几何面积小测",
+    subject: "数学",
+    grade: "五年级",
+    questionCount: 1,
+    totalScore: 8,
+    sourceFileUrl: "/mock/templates/old-geometry-quiz.pdf",
+    status: "disabled",
+    version: 1,
+    questions: [
+      { id: "q_disabled_018", no: "18", type: "subjective", score: 8, standardAnswer: "拆分图形后计算面积。", scoringRules: ["拆分图形 2 分", "公式正确 2 分", "计算正确 4 分"], knowledge: ["几何面积"], region: { page: 1, x: 110, y: 640, width: 600, height: 160 } }
     ]
   }
 ];
@@ -339,6 +537,23 @@ function toolFromQuestionType(type: string): TemplateTool {
   return "objective";
 }
 
+function questionTypeFromTool(type: TemplateTool): string {
+  if (type === "choice") {
+    return "single_choice";
+  }
+  return type;
+}
+
+function normalizeTemplateStatus(status?: string): TemplateStatus {
+  if (!status) {
+    return "draft";
+  }
+  if (status === "draft" || status === "disabled") {
+    return status;
+  }
+  return "published";
+}
+
 function regionsFromTemplate(template?: PaperTemplate): CanvasRegion[] {
   if (!template) {
     return [];
@@ -352,9 +567,287 @@ function regionsFromTemplate(template?: PaperTemplate): CanvasRegion[] {
       label: templateTools[type].label,
       color: templateTools[type].color,
       borderStyle: "solid",
+      score: question.score,
+      standardAnswer: question.standardAnswer ?? "",
+      scoringRules: question.scoringRules ?? [],
+      knowledge: question.knowledge,
       region: question.region
     };
   });
+}
+
+function hasDashboardData(data: DashboardData) {
+  return data.metrics.length > 0
+    || data.scanQueue.length > 0
+    || data.reviewQueue.length > 0
+    || data.weakPoints.length > 0
+    || data.homeworkWatch.length > 0;
+}
+
+function hasAnalyticsData(data: ClassroomAnalytics) {
+  return data.questionStats.length > 0
+    || data.knowledgeStats.length > 0
+    || data.studentRisks.length > 0;
+}
+
+function normalizeDashboardData(data: Partial<DashboardData> | null): DashboardData {
+  const source = data?.source === "fixtures" || data?.source === "local" ? data.source : "database";
+  return {
+    source,
+    metrics: Array.isArray(data?.metrics) ? data.metrics : [],
+    scanQueue: Array.isArray(data?.scanQueue) ? data.scanQueue : [],
+    reviewQueue: Array.isArray(data?.reviewQueue) ? data.reviewQueue : [],
+    weakPoints: Array.isArray(data?.weakPoints) ? data.weakPoints : [],
+    homeworkWatch: Array.isArray(data?.homeworkWatch) ? data.homeworkWatch : []
+  };
+}
+
+function normalizeAnalyticsData(data: Partial<ClassroomAnalytics> | null): ClassroomAnalytics {
+  return {
+    className: data?.className ?? "未选择班级",
+    averageScore: data?.averageScore ?? 0,
+    highestScore: data?.highestScore ?? 0,
+    lowestScore: data?.lowestScore ?? 0,
+    questionStats: Array.isArray(data?.questionStats) ? data.questionStats : [],
+    knowledgeStats: Array.isArray(data?.knowledgeStats) ? data.knowledgeStats : [],
+    studentRisks: Array.isArray(data?.studentRisks) ? data.studentRisks : []
+  };
+}
+
+function nextLoadingState(current: RequestState, loadingMessage: string, processingMessage: string): RequestState {
+  if (current.status === "success" || current.status === "error" || current.status === "empty") {
+    return { status: "processing", message: processingMessage };
+  }
+  return { status: "loading", message: loadingMessage };
+}
+
+function includesSearch(value: string, search: string) {
+  return value.toLowerCase().includes(search.trim().toLowerCase());
+}
+
+function pageItems<T>(items: T[], page: number) {
+  return items.slice((page - 1) * pageSize, page * pageSize);
+}
+
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function scanQueueLabel(status?: string) {
+  if (status === "queued") {
+    return "已入队";
+  }
+  if (status === "failed") {
+    return "入队失败";
+  }
+  if (status === "pending") {
+    return "等待入队";
+  }
+  return "未入队";
+}
+
+function scanMatchLabel(status?: string) {
+  if (status === "matched") {
+    return "已匹配";
+  }
+  if (status === "conflict") {
+    return "待人工确认";
+  }
+  return "待匹配";
+}
+
+function scanFileValidationError(files: File[]) {
+  if (files.length === 0) {
+    return "请选择 PDF、图片或 ZIP 扫描包";
+  }
+  if (files.length > maxScanFileCount) {
+    return `一次最多选择 ${maxScanFileCount} 个文件`;
+  }
+  for (const file of files) {
+    const extension = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
+    if (!allowedScanExtensions.includes(extension)) {
+      return `${file.name} 格式不支持，请选择 PDF、PNG、JPG、WebP 或 ZIP`;
+    }
+    if (file.type && !allowedScanMimeTypes.includes(file.type)) {
+      return `${file.name} 类型不支持：${file.type}`;
+    }
+    if (file.size > maxScanFileSizeBytes) {
+      return `${file.name} 超过 ${formatFileSize(maxScanFileSizeBytes)} 限制`;
+    }
+  }
+  return "";
+}
+
+function RequestStateView({
+  state,
+  onRetry,
+  compact = false
+}: {
+  state: RequestState;
+  onRetry?: () => void;
+  compact?: boolean;
+}) {
+  if (state.status === "success") {
+    return null;
+  }
+  const icon = state.status === "loading" || state.status === "processing"
+    ? <Loader2 size={18} />
+    : <AlertCircle size={18} />;
+  return (
+    <div className={`request-state request-state-${state.status}${compact ? " compact" : ""}`} role={state.status === "error" ? "alert" : "status"}>
+      <div className="request-state-copy">
+        {icon}
+        <div>
+          <strong>{state.message}</strong>
+          {state.detail ? <span>{state.detail}</span> : null}
+        </div>
+      </div>
+      {(state.status === "error" || state.status === "empty") && onRetry ? (
+        <button className="ghost-button" onClick={onRetry} type="button">
+          <RefreshCw size={16} />重试
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function apiStatusFromRequests(states: RequestState[]): ConnectionStatus {
+  if (states.some((state) => state.status === "error")) {
+    return "unavailable";
+  }
+  if (states.some((state) => state.status === "loading" || state.status === "processing")) {
+    return "checking";
+  }
+  return "available";
+}
+
+function connectionLabel(status: ConnectionStatus) {
+  const labels = {
+    checking: "检测中",
+    available: "可用",
+    unavailable: "不可用",
+    skipped: "已跳过"
+  } satisfies Record<ConnectionStatus, string>;
+  return labels[status];
+}
+
+function ConnectionStatusBar({
+  apiStatus,
+  databaseStatus = "skipped",
+  storageStatus = "skipped",
+  note
+}: {
+  apiStatus: ConnectionStatus;
+  databaseStatus?: ConnectionStatus;
+  storageStatus?: ConnectionStatus;
+  note: string;
+}) {
+  const items = [
+    { key: "api", icon: <Sparkles size={16} />, label: "Go API", status: apiStatus },
+    { key: "database", icon: <Database size={16} />, label: "数据库", status: databaseStatus },
+    { key: "storage", icon: <Cloud size={16} />, label: "对象存储", status: storageStatus }
+  ];
+  return (
+    <div className="connection-bar" role="status">
+      <div className="connection-items">
+        {items.map((item) => (
+          <span className={`connection-pill connection-${item.status}`} key={item.key}>
+            {item.icon}
+            {item.label}
+            <strong>{connectionLabel(item.status)}</strong>
+          </span>
+        ))}
+      </div>
+      <span className="connection-note">{note}</span>
+    </div>
+  );
+}
+
+function TableToolbar({
+  searchValue,
+  onSearchChange,
+  searchPlaceholder,
+  filterValue,
+  onFilterChange,
+  filterOptions,
+  sortValue,
+  onSortChange,
+  sortOptions,
+  selectedCount,
+  totalCount,
+  batchLabel,
+  onBatchAction
+}: {
+  searchValue: string;
+  onSearchChange: (value: string) => void;
+  searchPlaceholder: string;
+  filterValue: string;
+  onFilterChange: (value: string) => void;
+  filterOptions: Option[];
+  sortValue: string;
+  onSortChange: (value: string) => void;
+  sortOptions: Option[];
+  selectedCount: number;
+  totalCount: number;
+  batchLabel: string;
+  onBatchAction: () => void;
+}) {
+  return (
+    <div className="table-toolbar">
+      <label className="table-search">
+        搜索
+        <input
+          onChange={(event: { target: { value: string } }) => onSearchChange(event.target.value)}
+          placeholder={searchPlaceholder}
+          value={searchValue}
+        />
+      </label>
+      <label>
+        筛选
+        <select onChange={(event: { target: { value: string } }) => onFilterChange(event.target.value)} value={filterValue}>
+          {filterOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        排序
+        <select onChange={(event: { target: { value: string } }) => onSortChange(event.target.value)} value={sortValue}>
+          {sortOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+      <div className="batch-actions">
+        <span>已选 {selectedCount} / {totalCount}</span>
+        <button className="ghost-button" disabled={selectedCount === 0} onClick={onBatchAction} type="button">{batchLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+function TablePagination({
+  page,
+  total,
+  onPageChange
+}: {
+  page: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  return (
+    <div className="table-pagination">
+      <span>第 {Math.min(page, pageCount)} / {pageCount} 页</span>
+      <div>
+        <button className="ghost-button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} type="button">上一页</button>
+        <button className="ghost-button" disabled={page >= pageCount} onClick={() => onPageChange(page + 1)} type="button">下一页</button>
+      </div>
+    </div>
+  );
 }
 
 function loadStoredDrafts(): TemplateDraft[] {
@@ -388,14 +881,24 @@ function App() {
   const [subjective, setSubjective] = useState<SubjectiveData | null>(fallbackSubjective);
   const [templates, setTemplates] = useState<PaperTemplate[]>(loadStoredTemplateLibrary);
   const [analytics, setAnalytics] = useState<ClassroomAnalytics>(fallbackAnalytics);
+  const [dashboardState, setDashboardState] = useState<RequestState>({ status: "loading", message: "正在加载工作台数据" });
+  const [subjectiveState, setSubjectiveState] = useState<RequestState>({ status: "loading", message: "正在连接阅卷队列" });
+  const [templatesState, setTemplatesState] = useState<RequestState>({ status: "loading", message: "正在加载模版库" });
+  const [analyticsState, setAnalyticsState] = useState<RequestState>({ status: "loading", message: "正在加载学情数据" });
   const [selectedTemplateId, setSelectedTemplateId] = useState(fallbackTemplates[0].id);
   const [selectedReviewId, setSelectedReviewId] = useState(fallbackSubjective.reviewId);
   const [activeView, setActiveView] = useState<ActiveView>("workspace");
+  const [currentRole, setCurrentRole] = useState<UserRole>("teacher");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [notice, setNotice] = useState("已连接本地开发环境");
   const [scanTitle, setScanTitle] = useState("六年级数学期中卷");
   const [scanClassName, setScanClassName] = useState("六年级 3 班");
   const [scanPages, setScanPages] = useState(48);
+  const [scanTemplateId, setScanTemplateId] = useState(fallbackTemplates[0].id);
+  const [scanNotes, setScanNotes] = useState("");
+  const [scanFiles, setScanFiles] = useState<File[]>([]);
+  const [scanUploadedFiles, setScanUploadedFiles] = useState<ScanUploadFile[]>([]);
+  const [scanFileError, setScanFileError] = useState("");
   const [templateSourceMode, setTemplateSourceMode] = useState<TemplateSourceMode>("library");
   const [paperSources, setPaperSources] = useState<TemplatePaperSource[]>(fallbackPaperSources);
   const [selectedPaperSourceId, setSelectedPaperSourceId] = useState("");
@@ -414,6 +917,36 @@ function App() {
   const [queueStatus, setQueueStatus] = useState("正在连接阅卷队列");
   const [isReviewLoading, setIsReviewLoading] = useState(false);
   const [activeMode, setActiveMode] = useState<"review" | "template">("review");
+  const [scanSearch, setScanSearch] = useState("");
+  const [scanFilter, setScanFilter] = useState("all");
+  const [scanSort, setScanSort] = useState("progress_desc");
+  const [scanPage, setScanPage] = useState(1);
+  const [selectedScanIds, setSelectedScanIds] = useState<string[]>([]);
+  const [scanPreviewTask, setScanPreviewTask] = useState<ScanJob | null>(null);
+  const [scanPreviewFiles, setScanPreviewFiles] = useState<ScanUploadFile[]>([]);
+  const [scanMatchNames, setScanMatchNames] = useState<Record<string, string>>({});
+  const [aiSuggestedRegions, setAiSuggestedRegions] = useState<CanvasRegion[]>([]);
+  const [aiSuggestionState, setAiSuggestionState] = useState<RequestState>({ status: "empty", message: "暂无 AI 拆卷建议" });
+  const [reviewSearch, setReviewSearch] = useState("");
+  const [reviewFilter, setReviewFilter] = useState("all");
+  const [reviewSort, setReviewSort] = useState("confidence_desc");
+  const [reviewPage, setReviewPage] = useState(1);
+  const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([]);
+  const [templateSearch, setTemplateSearch] = useState("");
+  const [templateFilter, setTemplateFilter] = useState("all");
+  const [templateSort, setTemplateSort] = useState("name_asc");
+  const [templatePage, setTemplatePage] = useState(1);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+  const [mistakeSearch, setMistakeSearch] = useState("");
+  const [mistakeFilter, setMistakeFilter] = useState("all");
+  const [mistakeSort, setMistakeSort] = useState("wrong_desc");
+  const [mistakePage, setMistakePage] = useState(1);
+  const [selectedMistakeIds, setSelectedMistakeIds] = useState<string[]>([]);
+
+  const publishedTemplates = useMemo(
+    () => templates.filter((template) => normalizeTemplateStatus(template.status) === "published"),
+    [templates]
+  );
 
   useEffect(() => {
     loadDashboard();
@@ -422,8 +955,14 @@ function App() {
     loadAnalytics();
   }, []);
 
+  useEffect(() => {
+    if (!publishedTemplates.some((template) => template.id === scanTemplateId)) {
+      setScanTemplateId(publishedTemplates[0]?.id ?? "");
+    }
+  }, [publishedTemplates, scanTemplateId]);
+
   const selectedTemplate = useMemo(
-    () => templates.find((item) => item.id === selectedTemplateId) ?? templates[0],
+    () => selectedTemplateId ? templates.find((item) => item.id === selectedTemplateId) ?? templates[0] : undefined,
     [templates, selectedTemplateId]
   );
 
@@ -446,10 +985,165 @@ function App() {
     [canvasRegions, selectedRegionId]
   );
 
+  const selectedTemplateStatus = normalizeTemplateStatus(selectedTemplate?.status);
+  const canEditSelectedTemplate = selectedTemplateStatus === "draft";
+
   const selectedPaperSource = useMemo(
     () => paperSources.find((item) => item.id === selectedPaperSourceId),
     [paperSources, selectedPaperSourceId]
   );
+
+  const activeRole = roleConfig[currentRole];
+
+  const visibleNavItems = useMemo(
+    () => navItems.filter((item) => activeRole.views.includes(item.view)),
+    [activeRole]
+  );
+
+  const can = (permission: Permission) => activeRole.permissions.includes(permission);
+
+  useEffect(() => {
+    if (!activeRole.permissions.includes("scan:create") || (activeView !== "workspace" && activeView !== "scan")) {
+      return;
+    }
+    void loadScanTasks(true);
+    const timer = window.setInterval(() => {
+      void loadScanTasks(true);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeRole.permissions, activeView]);
+
+  const filteredScanQueue = useMemo(() => {
+    const rows = dashboard.scanQueue
+      .filter((job) => scanFilter === "all" || job.status.includes(scanFilter))
+      .filter((job) => includesSearch(`${job.title} ${job.className} ${job.status}`, scanSearch));
+    return [...rows].sort((a, b) => {
+      if (scanSort === "progress_asc") {
+        return a.progress - b.progress;
+      }
+      if (scanSort === "pages_desc") {
+        return b.pages - a.pages;
+      }
+      return b.progress - a.progress;
+    });
+  }, [dashboard.scanQueue, scanSearch, scanFilter, scanSort]);
+
+  const pagedScanQueue = pageItems(filteredScanQueue, scanPage);
+
+  const filteredReviewQueue = useMemo(() => {
+    const rows = dashboard.reviewQueue
+      .filter((item) => {
+        if (reviewFilter === "all") {
+          return true;
+        }
+        return reviewFilter === "high" ? item.confidence >= 80 : item.confidence < 80;
+      })
+      .filter((item) => includesSearch(`${item.studentName} ${item.paperName} ${item.questionNo}`, reviewSearch));
+    return [...rows].sort((a, b) => {
+      if (reviewSort === "question_asc") {
+        return Number(a.questionNo) - Number(b.questionNo);
+      }
+      if (reviewSort === "student_asc") {
+        return a.studentName.localeCompare(b.studentName, "zh-Hans-CN");
+      }
+      return b.confidence - a.confidence;
+    });
+  }, [dashboard.reviewQueue, reviewSearch, reviewFilter, reviewSort]);
+
+  const pagedReviewQueue = pageItems(filteredReviewQueue, reviewPage);
+
+  const filteredTemplates = useMemo(() => {
+    const rows = templates
+      .filter((template) => {
+        if (templateFilter === "all") {
+          return true;
+        }
+        if (templateFilter.startsWith("status:")) {
+          return normalizeTemplateStatus(template.status) === templateFilter.replace("status:", "");
+        }
+        return template.subject === templateFilter || template.grade === templateFilter;
+      })
+      .filter((template) => includesSearch(`${template.name} ${template.grade} ${template.subject}`, templateSearch));
+    return [...rows].sort((a, b) => {
+      if (templateSort === "score_desc") {
+        return b.totalScore - a.totalScore;
+      }
+      if (templateSort === "questions_desc") {
+        return b.questionCount - a.questionCount;
+      }
+      return a.name.localeCompare(b.name, "zh-Hans-CN");
+    });
+  }, [templates, templateSearch, templateFilter, templateSort]);
+
+  const pagedTemplates = pageItems(filteredTemplates, templatePage);
+
+  const filteredMistakes = useMemo(() => {
+    const rows = analytics.questionStats
+      .filter((item) => {
+        if (mistakeFilter === "all") {
+          return true;
+        }
+        const wrongRate = 100 - item.accuracy;
+        return mistakeFilter === "high" ? wrongRate >= 50 : wrongRate < 50;
+      })
+      .filter((item) => includesSearch(`第 ${item.no} 题 ${item.type}`, mistakeSearch));
+    return [...rows].sort((a, b) => {
+      if (mistakeSort === "question_asc") {
+        return Number(a.no) - Number(b.no);
+      }
+      if (mistakeSort === "accuracy_asc") {
+        return a.accuracy - b.accuracy;
+      }
+      return (100 - b.accuracy) - (100 - a.accuracy);
+    });
+  }, [analytics.questionStats, mistakeSearch, mistakeFilter, mistakeSort]);
+
+  const pagedMistakes = pageItems(filteredMistakes, mistakePage);
+
+  const activeConnection = useMemo(() => {
+    const requestStatesByView = {
+      workspace: [dashboardState, subjectiveState, analyticsState],
+      scan: [dashboardState],
+      templates: [templatesState],
+      grading: [subjectiveState],
+      mistakes: [analyticsState],
+      analytics: [analyticsState]
+    } satisfies Record<ActiveView, RequestState[]>;
+    const apiStatus = apiStatusFromRequests(requestStatesByView[activeView]);
+    const notes = {
+      workspace: "数据库和对象存储连接检测暂时跳过；工作台优先展示 API 数据，失败时回退演示数据。",
+      scan: "扫描上传、任务创建和进度轮询优先走 Go API；API 不可用时保留当前页面数据。",
+      templates: "数据库连接检测暂时跳过；模板库优先读取 API，失败时回退本地模板。",
+      grading: "数据库连接检测暂时跳过；教师裁定保存失败时只保留本地状态提示。",
+      mistakes: "数据库连接检测暂时跳过；错题统计优先读取学情 API，失败时回退演示数据。",
+      analytics: "数据库连接检测暂时跳过；学情分析优先读取 API，失败时回退演示数据。"
+    } satisfies Record<ActiveView, string>;
+    const dashboardSourceNote = dashboard.source === "database"
+      ? "工作台正在展示 Go API 从数据库读取的实时数据。"
+      : dashboard.source === "fixtures"
+        ? "Go API 已响应，但数据库查询不可用；工作台展示后端演示数据。"
+        : "工作台 API 当前不可用，页面已使用本地演示数据兜底。";
+    const apiNote = apiStatus === "unavailable"
+      ? "API 当前不可用，页面已使用本地演示数据兜底。"
+      : apiStatus === "checking"
+        ? "正在检测当前页面 API 请求状态。"
+        : activeView === "workspace" || activeView === "scan"
+          ? dashboardSourceNote
+          : notes[activeView];
+    const databaseStatus = activeView === "workspace" || activeView === "scan"
+      ? dashboard.source === "database"
+        ? "available"
+        : dashboard.source === "fixtures"
+          ? "unavailable"
+          : "skipped"
+      : "skipped";
+    return {
+      apiStatus,
+      databaseStatus: databaseStatus as ConnectionStatus,
+      storageStatus: "skipped" as ConnectionStatus,
+      note: apiNote
+    };
+  }, [activeView, dashboard.source, dashboardState, subjectiveState, templatesState, analyticsState]);
 
   const viewCopy = {
     workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
@@ -461,6 +1155,12 @@ function App() {
   } satisfies Record<ActiveView, { eyebrow: string; title: string }>;
 
   function openView(view: ActiveView) {
+    if (!activeRole.views.includes(view)) {
+      const fallbackView = activeRole.views[0] ?? "workspace";
+      setActiveView(fallbackView);
+      setNotice(`${activeRole.label}角色无权访问该入口`);
+      return;
+    }
     setActiveView(view);
     setOverlay(null);
     if (view === "grading") {
@@ -471,35 +1171,249 @@ function App() {
     }
   }
 
+  function switchRole(role: UserRole) {
+    const nextRole = roleConfig[role];
+    setCurrentRole(role);
+    setOverlay(null);
+    if (!nextRole.views.includes(activeView)) {
+      setActiveView(nextRole.views[0] ?? "workspace");
+    }
+    if (!nextRole.permissions.includes("scan:create")) {
+      setTemplateSourceMode("library");
+    }
+    setNotice(`已切换为${nextRole.label}视图`);
+  }
+
   function toggleOverlay(next: Exclude<Overlay, null>) {
     setOverlay((current) => current === next ? null : next);
   }
 
-  function submitScanImport() {
-    const nextJob: ScanJob = {
-      id: `scan_local_${Date.now()}`,
-      title: scanTitle || "未命名扫描任务",
-      className: scanClassName || "未选择班级",
-      pages: Number(scanPages) || 1,
-      status: "待 OCR",
-      progress: 0
-    };
-    setDashboard((current) => ({
-      ...current,
-      scanQueue: [nextJob, ...current.scanQueue]
-    }));
+  function openScanImport() {
+    setScanFilter("all");
+    setScanSearch("");
+    setScanPage(1);
+    openView("scan");
+    setNotice("已进入扫描导入，可创建新的 OCR 队列任务");
+  }
+
+  function openTemplateCreate() {
+    if (!can("template:edit")) {
+      openView("templates");
+      return;
+    }
+    setSelectedTemplateId("");
+    setCanvasTitle("未命名试卷模板");
+    setCanvasRegions([]);
+    setSelectedRegionId("");
+    setTemplateSourceMode("library");
+    setCanvasSize(canvasPresets[1]);
+    setCanvasZoom(1);
+    openView("templates");
+    setNotice("已进入模板创建，可选择试卷来源并框选题区");
+  }
+
+  function openReviewQueue() {
+    setReviewFilter("all");
+    setReviewSearch("");
+    setReviewPage(1);
+    openView("grading");
+    setNotice("已进入阅卷中心，可从复核队列连续批阅");
+  }
+
+  function openMistakeView(filter: "all" | "high" | "low" = "all") {
+    setMistakeFilter(filter);
+    setMistakeSearch("");
+    setMistakePage(1);
+    openView("mistakes");
+    setNotice(filter === "all" ? "已进入错题集" : "已按错误率筛选错题");
+  }
+
+  function openAnalyticsView() {
+    openView("analytics");
+    setNotice("已进入学情分析，查看班级成绩和学生风险");
+  }
+
+  function applyWorkspaceFilter(kind: "class" | "today" | "review") {
+    setOverlay(null);
+    if (kind === "class") {
+      setScanSearch("六年级 3 班");
+      setReviewSearch("六年级数学");
+      setNotice("已筛选六年级 3 班相关任务");
+      return;
+    }
+    if (kind === "review") {
+      setReviewFilter("low");
+      setReviewPage(1);
+      openReviewQueue();
+      setNotice("已进入需重点看的主观题复核队列");
+      return;
+    }
+    setScanFilter("all");
+    setReviewFilter("all");
+    setNotice("已恢复今日工作台任务视图");
+  }
+
+  function openMetricTarget(label: string) {
+    if (label.includes("待批") || label.includes("扫描")) {
+      openScanImport();
+      return;
+    }
+    if (label.includes("复核")) {
+      openReviewQueue();
+      return;
+    }
+    if (label.includes("未提交")) {
+      openAnalyticsView();
+      setNotice("已定位到学生风险与家长提醒");
+      return;
+    }
+    openAnalyticsView();
+  }
+
+  function selectScanFiles(files: FileList | null) {
+    const nextFiles = Array.from(files ?? []);
+    const error = scanFileValidationError(nextFiles);
+    setScanFiles(error ? [] : nextFiles);
+    setScanUploadedFiles([]);
+    setScanFileError(error);
+    if (!error && nextFiles.length > 0) {
+      setNotice(`已选择 ${nextFiles.length} 个扫描文件`);
+    }
+  }
+
+  function validateScanTaskForm() {
+    if (!scanTitle.trim()) {
+      return "请填写考试/作业名称";
+    }
+    if (!scanClassName.trim()) {
+      return "请填写班级";
+    }
+    if (!scanTemplateId) {
+      return "请选择已发布或可用模板";
+    }
+    if (!Number.isFinite(scanPages) || scanPages < 1) {
+      return "页数必须大于 0";
+    }
+    const fileError = scanFileValidationError(scanFiles);
+    if (fileError) {
+      return fileError;
+    }
+    return "";
+  }
+
+  async function uploadScanFilesToApi() {
+    const form = new FormData();
+    scanFiles.forEach((file) => form.append("files", file));
+    const response = await fetch("/api/scan/uploads", {
+      method: "POST",
+      body: form
+    });
+    if (!response.ok) {
+      throw new Error("scan upload api failed");
+    }
+    const result = await response.json() as ScanUploadResponse;
+    return result.files;
+  }
+
+  async function createScanTaskInApi(files: ScanUploadFile[]) {
+    const template = templates.find((item) => item.id === scanTemplateId);
+    const response = await fetch("/api/scan/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: scanTitle.trim(),
+        className: scanClassName.trim(),
+        templateId: scanTemplateId,
+        templateVersion: template?.version ?? 1,
+        pages: Number(scanPages),
+        notes: scanNotes.trim(),
+        files
+      })
+    });
+    if (!response.ok) {
+      throw new Error("scan task api failed");
+    }
+    return await response.json() as ScanTaskResponse;
+  }
+
+  async function submitScanImport() {
+    const formError = validateScanTaskForm();
+    if (formError) {
+      setScanFileError(formError);
+      setNotice(formError);
+      return;
+    }
+    setDashboardState({ status: "processing", message: "正在上传扫描件", detail: "上传成功后会创建 OCR 队列任务。" });
+    try {
+      const files = await uploadScanFilesToApi();
+      setScanUploadedFiles(files);
+      const result = await createScanTaskInApi(files);
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: [result.task, ...current.scanQueue]
+      }));
+      addPaperSourceFromScanJob(result.task);
+      setDashboardState({ status: "success", message: "扫描任务已创建" });
+      setScanFileError("");
+      setScanFiles([]);
+      setNotice(result.queueError
+        ? `${result.task.title} 已创建任务，但队列投递失败：${result.queueError}`
+        : `${result.task.title} 已创建任务并写入队列：${result.queueId ?? result.task.id}`);
+      setActiveView("workspace");
+      return;
+    } catch {
+      const localFiles: ScanUploadFile[] = scanFiles.map((file, index) => ({
+        key: `local/scan/${Date.now()}_${index}_${file.name}`,
+        fileName: file.name,
+        contentType: file.type || "application/octet-stream",
+        size: file.size,
+        url: ""
+      }));
+      setScanUploadedFiles(localFiles);
+      setDashboardState({
+        status: "error",
+        message: "扫描上传 API 请求失败",
+        detail: "已在本地生成临时扫描任务，可稍后重试 API。"
+      });
+      setScanFileError("");
+      setNotice("扫描上传 API 不可用，已生成本地临时任务");
+      const nextJob: ScanJob = {
+        id: `scan_local_${Date.now()}`,
+        title: scanTitle.trim() || "未命名扫描任务",
+        className: scanClassName.trim() || "未选择班级",
+        templateId: scanTemplateId,
+        templateVersion: templates.find((item) => item.id === scanTemplateId)?.version ?? 1,
+        pages: Number(scanPages) || 1,
+        notes: scanNotes.trim(),
+        status: "待 OCR",
+        progress: 0,
+        failureReason: "",
+        retryCount: 0,
+        queueStatus: "pending",
+        queueMessage: "",
+        files: localFiles
+      };
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: [nextJob, ...current.scanQueue]
+      }));
+      addPaperSourceFromScanJob(nextJob);
+      setActiveView("workspace");
+    }
+  }
+
+  function addPaperSourceFromScanJob(job: ScanJob) {
     const nextSource: TemplatePaperSource = {
       id: `paper_local_${Date.now()}`,
-      title: nextJob.title,
-      className: nextJob.className,
-      pages: nextJob.pages,
+      title: job.title,
+      className: job.className,
+      pages: job.pages,
       size: canvasPresets[1],
       importedAt: "刚刚",
       source: "现场扫描"
     };
     setPaperSources((current) => [nextSource, ...current]);
-    setNotice(`${nextJob.title} 已加入扫描队列`);
-    setActiveView("workspace");
+    return nextSource;
   }
 
   function applyPaperSource(source: TemplatePaperSource) {
@@ -539,33 +1453,122 @@ function App() {
     window.localStorage.setItem(templateLibraryStorageKey, JSON.stringify(nextTemplates));
   }
 
-  function canvasRegionsToQuestions(regions: CanvasRegion[], templateID: string): QuestionTemplate[] {
+  function canvasRegionsToQuestions(regions: CanvasRegion[], _templateID: string): QuestionTemplate[] {
     return regions.map((item, index) => ({
-      id: `${templateID}_${item.id}`,
+      id: item.id,
       no: item.no || `${index + 1}`,
-      type: item.type,
-      score: item.type === "subjective" ? 10 : 2,
-      knowledge: [],
+      type: questionTypeFromTool(item.type),
+      score: item.score,
+      standardAnswer: item.standardAnswer,
+      scoringRules: item.scoringRules,
+      knowledge: item.knowledge,
       region: item.region
     }));
   }
 
-  function saveCurrentAsTemplate() {
+  async function writeTemplateToApi(endpoint: string, method: "POST" | "PUT", template: PaperTemplate) {
+    const response = await fetch(endpoint, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(template)
+    });
+    if (!response.ok) {
+      throw new Error("template mutation api failed");
+    }
+    const result = await response.json() as TemplateMutationResponse;
+    return result.template;
+  }
+
+  async function writeTemplateRegionToApi(endpoint: string, method: "POST" | "PUT", question: QuestionTemplate) {
+    const response = await fetch(endpoint, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(question)
+    });
+    if (!response.ok) {
+      throw new Error("template region api failed");
+    }
+    return await response.json() as TemplateRegionMutationResponse;
+  }
+
+  function applyTemplateMutation(template: PaperTemplate) {
+    const nextTemplates = templates.some((item) => item.id === template.id)
+      ? templates.map((item) => item.id === template.id ? template : item)
+      : [template, ...templates];
+    persistTemplateLibrary(nextTemplates.slice(0, 12));
+    setSelectedTemplateId(template.id);
+    const nextRegions = regionsFromTemplate(template);
+    setCanvasRegions(nextRegions);
+    setSelectedRegionId((current) => nextRegions.find((item) => item.id === current)?.id ?? nextRegions[0]?.id ?? "");
+  }
+
+  function buildCurrentTemplate(templateID: string): PaperTemplate {
     const title = canvasTitle.trim() || "未命名试卷模版";
-    const templateID = `tpl_local_${Date.now()}`;
     const questions = canvasRegionsToQuestions(canvasRegions, templateID);
-    const nextTemplate: PaperTemplate = {
+    return {
       id: templateID,
       name: title,
       subject: "数学",
       grade: "六年级",
       questionCount: Math.max(questions.length, 1),
       totalScore: questions.reduce((sum, item) => sum + item.score, 0),
+      sourceFileUrl: selectedPaperSource ? `/mock/templates/${selectedPaperSource.id}.pdf` : (selectedTemplate?.sourceFileUrl ?? ""),
+      status: selectedTemplate?.id === templateID ? normalizeTemplateStatus(selectedTemplate.status) : "draft",
+      version: selectedTemplate?.id === templateID ? (selectedTemplate.version ?? 1) : 1,
+      parentId: selectedTemplate?.id === templateID ? (selectedTemplate.parentId ?? "") : "",
       questions
     };
-    persistTemplateLibrary([nextTemplate, ...templates].slice(0, 12));
-    setSelectedTemplateId(templateID);
-    setNotice(`${title} 已保存到模版库`);
+  }
+
+  async function saveCurrentAsTemplate() {
+    const localTemplate = buildCurrentTemplate(`tpl_local_${Date.now()}`);
+    setTemplatesState({ status: "processing", message: "正在保存模版", detail: "优先写入 Go API 模板库。" });
+    try {
+      const savedTemplate = await writeTemplateToApi("/api/templates", "POST", localTemplate);
+      const nextTemplates = [savedTemplate, ...templates.filter((item) => item.id !== savedTemplate.id)].slice(0, 12);
+      persistTemplateLibrary(nextTemplates);
+      setSelectedTemplateId(savedTemplate.id);
+      setTemplatesState({ status: "success", message: "模版已保存" });
+      setNotice(`${savedTemplate.name} 已保存到 API 模版库`);
+    } catch {
+      persistTemplateLibrary([localTemplate, ...templates].slice(0, 12));
+      setSelectedTemplateId(localTemplate.id);
+      setTemplatesState({
+        status: "error",
+        message: "模版保存 API 请求失败",
+        detail: "已保存到本地模版库，可稍后重试 API。"
+      });
+      setNotice(`${localTemplate.name} 已保存到本地模版库`);
+    }
+  }
+
+  async function updateCurrentTemplate() {
+    if (!selectedTemplateId) {
+      setNotice("请先选择要更新的模版");
+      return;
+    }
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接编辑，请先复制新版本");
+      return;
+    }
+    const localTemplate = buildCurrentTemplate(selectedTemplateId);
+    setTemplatesState({ status: "processing", message: "正在更新模版", detail: "优先写入 Go API 模板库。" });
+    try {
+      const savedTemplate = await writeTemplateToApi(`/api/templates/${encodeURIComponent(selectedTemplateId)}`, "PUT", localTemplate);
+      const nextTemplates = templates.map((item) => item.id === savedTemplate.id ? savedTemplate : item);
+      persistTemplateLibrary(nextTemplates);
+      setTemplatesState({ status: "success", message: "模版已更新" });
+      setNotice(`${savedTemplate.name} 已更新到 API 模版库`);
+    } catch {
+      const nextTemplates = templates.map((item) => item.id === selectedTemplateId ? localTemplate : item);
+      persistTemplateLibrary(nextTemplates);
+      setTemplatesState({
+        status: "error",
+        message: "模版更新 API 请求失败",
+        detail: "已更新本地模版库，可稍后重试 API。"
+      });
+      setNotice(`${localTemplate.name} 已更新到本地模版库`);
+    }
   }
 
   function applyTemplateFromLibrary(template: PaperTemplate) {
@@ -577,11 +1580,103 @@ function App() {
     setNotice(`已引用模版：${template.name}`);
   }
 
-  function deleteTemplateFromLibrary(templateID: string) {
+  async function deleteTemplateFromLibrary(templateID: string) {
     const nextTemplates = templates.filter((item) => item.id !== templateID);
-    persistTemplateLibrary(nextTemplates);
-    setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
-    setNotice("已从模版库删除");
+    setTemplatesState({ status: "processing", message: "正在删除模版", detail: "优先从 Go API 模板库删除。" });
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("template delete api failed");
+      }
+      persistTemplateLibrary(nextTemplates);
+      setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
+      setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
+      setTemplatesState(nextTemplates.length > 0 ? { status: "success", message: "模版已删除" } : { status: "empty", message: "暂无可用模版" });
+      setNotice("已从 API 模版库删除");
+    } catch {
+      persistTemplateLibrary(nextTemplates);
+      setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
+      setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
+      setTemplatesState({
+        status: "error",
+        message: "模版删除 API 请求失败",
+        detail: "已从本地模版库删除，可稍后同步 API。"
+      });
+      setNotice("已从本地模版库删除");
+    }
+  }
+
+  async function copyTemplateFromLibrary(templateID: string) {
+    const source = templates.find((item) => item.id === templateID);
+    if (!source) {
+      setNotice("未找到可复制的模版");
+      return;
+    }
+    setTemplatesState({ status: "processing", message: "正在复制模版", detail: "优先调用 Go API 复制。" });
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}/copy`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error("template copy api failed");
+      }
+      const result = await response.json() as TemplateMutationResponse;
+      persistTemplateLibrary([result.template, ...templates].slice(0, 12));
+      setSelectedTemplateId(result.template.id);
+      setTemplatesState({ status: "success", message: "模版已复制" });
+      setNotice(`${result.template.name} 已复制到 API 模版库`);
+    } catch {
+      const copiedTemplate: PaperTemplate = {
+        ...source,
+        id: `tpl_copy_${Date.now()}`,
+        name: `${source.name} 副本`,
+        status: "draft",
+        version: (source.version ?? 1) + 1,
+        parentId: source.parentId || source.id,
+        questions: source.questions.map((question) => ({ ...question, id: `q_copy_${Date.now()}_${question.no}` }))
+      };
+      persistTemplateLibrary([copiedTemplate, ...templates].slice(0, 12));
+      setSelectedTemplateId(copiedTemplate.id);
+      setTemplatesState({
+        status: "error",
+        message: "模版复制 API 请求失败",
+        detail: "已复制到本地模版库，可稍后同步 API。"
+      });
+      setNotice(`${copiedTemplate.name} 已复制到本地模版库`);
+    }
+  }
+
+  async function updateTemplateStatus(templateID: string, status: TemplateStatus) {
+    const source = templates.find((item) => item.id === templateID);
+    if (!source) {
+      setNotice("未找到要流转的模版");
+      return;
+    }
+    const statusLabel = templateStatusLabels[status];
+    setTemplatesState({ status: "processing", message: `正在${statusLabel}模版`, detail: "优先写入 Go API 模板库状态。" });
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}/status`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+      if (!response.ok) {
+        throw new Error("template status api failed");
+      }
+      const result = await response.json() as TemplateMutationResponse;
+      const nextTemplates = templates.map((item) => item.id === result.template.id ? result.template : item);
+      persistTemplateLibrary(nextTemplates);
+      setTemplatesState({ status: "success", message: `模版已${statusLabel}` });
+      setNotice(`${result.template.name} 已${statusLabel}`);
+    } catch {
+      const localTemplate = { ...source, status };
+      const nextTemplates = templates.map((item) => item.id === templateID ? localTemplate : item);
+      persistTemplateLibrary(nextTemplates);
+      setTemplatesState({
+        status: "error",
+        message: "模版状态 API 请求失败",
+        detail: "已更新本地模版库状态，可稍后同步 API。"
+      });
+      setNotice(`${source.name} 已在本地标记为${statusLabel}`);
+    }
   }
 
   function saveTemplateDraft() {
@@ -610,57 +1705,311 @@ function App() {
     setNotice(`已从草稿箱打开：${draft.title}`);
   }
 
+  function regionsFromAIQuestions(questions: QuestionTemplate[]): CanvasRegion[] {
+    return regionsFromTemplate({
+      id: selectedTemplateId || "ai_suggestion",
+      name: canvasTitle,
+      subject: "数学",
+      grade: "六年级",
+      questionCount: questions.length,
+      totalScore: questions.reduce((sum, question) => sum + question.score, 0),
+      status: "draft",
+      version: selectedTemplate?.version ?? 1,
+      questions
+    });
+  }
+
+  async function generateTemplateAISuggestions() {
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模板不可直接写入 AI 建议，请先复制新版本");
+      return;
+    }
+    if (!selectedTemplateId) {
+      setNotice("请先保存或选择一个草稿模板，再生成 AI 拆卷建议");
+      return;
+    }
+    setAiSuggestionState({ status: "processing", message: "正在生成 AI 拆卷建议", detail: "会识别题区、题型、题号并等待教师确认。" });
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(selectedTemplateId)}/ai-suggestions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          paperName: canvasTitle,
+          sourceFileUrl: selectedPaperSource ? `/mock/templates/${selectedPaperSource.id}.pdf` : (selectedTemplate?.sourceFileUrl ?? "")
+        })
+      });
+      if (!response.ok) {
+        throw new Error("template ai suggestion api failed");
+      }
+      const result = await response.json() as TemplateAISuggestionResponse;
+      const nextRegions = regionsFromAIQuestions(result.suggestedQuestions);
+      setAiSuggestedRegions(nextRegions);
+      setCanvasRegions(nextRegions);
+      setSelectedRegionId(nextRegions[0]?.id ?? "");
+      setAiSuggestionState({
+        status: "success",
+        message: `AI 已建议 ${result.questionCount} 个题区`,
+        detail: `${result.source} · 总分 ${result.totalScore} · 请确认后写入模板库。`
+      });
+      setNotice("AI 拆卷建议已载入画布，确认后可写入模板库");
+    } catch {
+      const fallback = regionsFromAIQuestions([
+        { id: `ai_q_${Date.now()}_1`, no: "1", type: "single_choice", score: 2, standardAnswer: "A", scoringRules: ["选对 A 得 2 分"], knowledge: ["分数"], region: { page: 1, x: 120, y: 260, width: 480, height: 80 } },
+        { id: `ai_q_${Date.now()}_15`, no: "15", type: "subjective", score: 10, standardAnswer: "列比例关系并计算。", scoringRules: ["建模 2 分", "列式 4 分", "计算 2 分", "答语 2 分"], knowledge: ["比例", "应用题建模"], region: { page: 2, x: 96, y: 420, width: 620, height: 180 } }
+      ]);
+      setAiSuggestedRegions(fallback);
+      setCanvasRegions(fallback);
+      setSelectedRegionId(fallback[0]?.id ?? "");
+      setAiSuggestionState({
+        status: "error",
+        message: "AI 拆卷 API 请求失败",
+        detail: "已载入本地建议，可确认后写入草稿模板。"
+      });
+      setNotice("AI 拆卷 API 不可用，已使用本地建议");
+    }
+  }
+
+  async function confirmTemplateAISuggestions() {
+    if (aiSuggestedRegions.length === 0) {
+      setNotice("请先生成 AI 拆卷建议");
+      return;
+    }
+    await saveCurrentRegions();
+    setAiSuggestedRegions([]);
+    setAiSuggestionState({ status: "success", message: "AI 建议题区已写入模板库" });
+  }
+
   function sendGuardianReminders() {
     const names = analytics.studentRisks.map((item) => item.studentName).join("、");
     setNotice(names ? `已生成 ${names} 的家长提醒` : "当前没有需要提醒的学生");
   }
 
+  function toggleSelected(id: string, selectedIds: string[], setter: (value: string[]) => void) {
+    setter(selectedIds.includes(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]);
+  }
+
+  function runBatchAction(label: string, count: number) {
+    setNotice(count > 0 ? `${label}：已选择 ${count} 项` : "请先选择要批量处理的数据");
+  }
+
+  function retrySelectedScanTasks() {
+    const tasks = dashboard.scanQueue.filter((job) => selectedScanIds.includes(job.id));
+    if (tasks.length === 0) {
+      setNotice("请先选择要重试的扫描任务");
+      return;
+    }
+    tasks.forEach((task) => void retryScanTask(task));
+  }
+
   async function loadDashboard() {
+    setDashboardState((current) => nextLoadingState(current, "正在加载工作台数据", "正在刷新工作台数据"));
     try {
       const response = await fetch("/api/dashboard");
       if (!response.ok) {
         throw new Error("dashboard api failed");
       }
-      const data = await response.json() as DashboardData;
+      const data = normalizeDashboardData(await response.json() as Partial<DashboardData> | null);
       setDashboard(data);
+      setDashboardState(hasDashboardData(data)
+        ? { status: "success", message: "工作台数据已更新" }
+        : { status: "empty", message: "暂无工作台任务", detail: "扫描队列、复核队列和统计指标当前为空。" });
       return data;
     } catch {
       setDashboard(fallbackDashboard);
+      setDashboardState({
+        status: "error",
+        message: "工作台 API 请求失败",
+        detail: "已展示本地演示数据，可重试连接 Go API。"
+      });
       return fallbackDashboard;
     }
   }
 
+  async function loadScanTasks(silent = false) {
+    if (!silent) {
+      setDashboardState((current) => nextLoadingState(current, "正在加载扫描任务", "正在刷新扫描任务"));
+    }
+    try {
+      const response = await fetch("/api/scan/tasks");
+      if (!response.ok) {
+        throw new Error("scan tasks api failed");
+      }
+      const result = await response.json() as ScanTaskListResponse;
+      const tasks = Array.isArray(result.tasks) ? result.tasks : [];
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: tasks
+      }));
+      if (!silent) {
+        setDashboardState(tasks.length > 0
+          ? { status: "success", message: "扫描任务已更新" }
+          : { status: "empty", message: "暂无扫描任务", detail: "上传扫描件并创建任务后会显示在这里。" });
+      }
+      return tasks;
+    } catch {
+      if (!silent) {
+        setDashboardState({
+          status: "error",
+          message: "扫描任务 API 请求失败",
+          detail: "已保留当前页面任务列表，可稍后重试。"
+        });
+      }
+      return dashboard.scanQueue;
+    }
+  }
+
+  async function openScanPreview(job: ScanJob) {
+    try {
+      const response = await fetch(`/api/scan/tasks/${encodeURIComponent(job.id)}/preview`);
+      if (!response.ok) {
+        throw new Error("scan preview api failed");
+      }
+      const result = await response.json() as ScanTaskPreviewResponse;
+      setScanPreviewTask(result.task);
+      setScanPreviewFiles(Array.isArray(result.files) ? result.files : []);
+      setScanMatchNames(Object.fromEntries((result.files ?? []).map((file) => [file.key, file.studentName ?? ""])));
+      setNotice(`已打开扫描预览：${result.task.title}`);
+    } catch {
+      const files = job.files ?? [];
+      setScanPreviewTask(job);
+      setScanPreviewFiles(files);
+      setScanMatchNames(Object.fromEntries(files.map((file) => [file.key, file.studentName ?? ""])));
+      setNotice("扫描预览 API 不可用，已显示当前任务文件信息");
+    }
+  }
+
+  async function retryScanTask(job: ScanJob, fileKey = "") {
+    setDashboardState({ status: "processing", message: fileKey ? "正在重试单个文件" : "正在重试扫描任务" });
+    try {
+      const response = await fetch(`/api/scan/tasks/${encodeURIComponent(job.id)}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileKey })
+      });
+      if (!response.ok) {
+        throw new Error("scan retry api failed");
+      }
+      const result = await response.json() as ScanTaskResponse;
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: current.scanQueue.map((item) => item.id === result.task.id ? result.task : item)
+      }));
+      if (scanPreviewTask?.id === result.task.id) {
+        setScanPreviewTask(result.task);
+        setScanPreviewFiles(result.task.files ?? []);
+      }
+      setDashboardState({ status: "success", message: "扫描任务已重试" });
+      setNotice(result.queueError ? `重试已记录，但队列投递失败：${result.queueError}` : "重试任务已重新入队");
+    } catch {
+      const nextJob = {
+        ...job,
+        status: "排队中",
+        progress: 0,
+        retryCount: (job.retryCount ?? 0) + 1,
+        failureReason: "",
+        queueStatus: "pending",
+        files: (job.files ?? []).map((file) => fileKey && file.key !== fileKey ? file : { ...file, status: "待重试", failureReason: "" })
+      };
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: current.scanQueue.map((item) => item.id === job.id ? nextJob : item)
+      }));
+      if (scanPreviewTask?.id === job.id) {
+        setScanPreviewTask(nextJob);
+        setScanPreviewFiles(nextJob.files ?? []);
+      }
+      setDashboardState({ status: "error", message: "扫描重试 API 请求失败", detail: "已在本地标记重试，可稍后同步 API。" });
+      setNotice("扫描重试 API 不可用，已本地记录重试");
+    }
+  }
+
+  async function matchScanFile(job: ScanJob, file: ScanUploadFile) {
+    const studentName = (scanMatchNames[file.key] ?? "").trim();
+    if (!studentName) {
+      setNotice("请先填写学生姓名");
+      return;
+    }
+    try {
+      const response = await fetch(`/api/scan/tasks/${encodeURIComponent(job.id)}/match`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileKey: file.key,
+          studentName,
+          matchMethod: "manual"
+        })
+      });
+      if (!response.ok) {
+        throw new Error("scan match api failed");
+      }
+      const result = await response.json() as ScanTaskResponse;
+      setDashboard((current) => ({
+        ...current,
+        scanQueue: current.scanQueue.map((item) => item.id === result.task.id ? result.task : item)
+      }));
+      setScanPreviewTask(result.task);
+      setScanPreviewFiles(result.task.files ?? []);
+      setNotice(`${file.fileName} 已匹配到 ${studentName}`);
+    } catch {
+      const nextFiles = scanPreviewFiles.map((item) => item.key === file.key
+        ? { ...item, studentName, matchStatus: "matched", matchMethod: "manual" }
+        : item);
+      setScanPreviewFiles(nextFiles);
+      setNotice("学生匹配 API 不可用，已在本地更新预览状态");
+    }
+  }
+
   async function loadTemplates() {
+    setTemplatesState((current) => nextLoadingState(current, "正在加载模版库", "正在刷新模版库"));
     try {
       const response = await fetch("/api/templates");
       if (!response.ok) {
         throw new Error("templates api failed");
       }
       const data = await response.json() as PaperTemplate[];
+      setTemplates(data);
       if (templates.length === 0 && data.length > 0) {
         persistTemplateLibrary(data);
       }
       if (data[0] && !selectedTemplateId) {
         setSelectedTemplateId(data[0].id);
       }
+      setTemplatesState(data.length > 0
+        ? { status: "success", message: "模版库已更新" }
+        : { status: "empty", message: "暂无可用模版", detail: "保存模板或重试接口后会显示在这里。" });
       return data;
     } catch {
-      setTemplates(fallbackTemplates);
-      return fallbackTemplates;
+      const localTemplates = loadStoredTemplateLibrary();
+      setTemplates(localTemplates);
+      setTemplatesState({
+        status: "error",
+        message: "模版库 API 请求失败",
+        detail: "已展示本地模版库，可重试连接 Go API。"
+      });
+      return localTemplates;
     }
   }
 
   async function loadAnalytics() {
+    setAnalyticsState((current) => nextLoadingState(current, "正在加载学情数据", "正在刷新学情数据"));
     try {
       const response = await fetch("/api/analytics/classroom");
       if (!response.ok) {
         throw new Error("analytics api failed");
       }
-      const data = await response.json() as ClassroomAnalytics;
+      const data = normalizeAnalyticsData(await response.json() as Partial<ClassroomAnalytics> | null);
       setAnalytics(data);
+      setAnalyticsState(hasAnalyticsData(data)
+        ? { status: "success", message: "学情数据已更新" }
+        : { status: "empty", message: "暂无学情数据", detail: "当前班级还没有题目、知识点或学生风险统计。" });
       return data;
     } catch {
       setAnalytics(fallbackAnalytics);
+      setAnalyticsState({
+        status: "error",
+        message: "学情 API 请求失败",
+        detail: "已展示本地演示数据，可重试连接 Go API。"
+      });
       return fallbackAnalytics;
     }
   }
@@ -714,7 +2063,11 @@ function App() {
     };
   }
 
-  function addRegionAt(event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) {
+  async function addRegionAt(event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) {
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接新增题区，请先复制新版本");
+      return;
+    }
     const point = canvasPoint(event);
     const tool = templateTools[activeTool];
     const nextIndex = canvasRegions.length + 1;
@@ -722,10 +2075,14 @@ function App() {
       id: `region_${Date.now()}`,
       no: `${nextIndex}`,
       type: activeTool,
-      label: tool.label,
-      color: tool.color,
-      borderStyle: "solid",
-      region: clampRegion({
+	      label: tool.label,
+	      color: tool.color,
+	      borderStyle: "solid",
+	      score: activeTool === "subjective" ? 10 : 2,
+	      standardAnswer: "",
+	      scoringRules: [],
+	      knowledge: [],
+	      region: clampRegion({
         page: 1,
         x: point.x - 90,
         y: point.y - 34,
@@ -736,9 +2093,33 @@ function App() {
     setCanvasRegions((current) => [...current, nextRegion]);
     setSelectedRegionId(nextRegion.id);
     setNotice(`已添加${tool.label}区域`);
+    if (!selectedTemplateId) {
+      return;
+    }
+    try {
+      const result = await writeTemplateRegionToApi(
+        `/api/templates/${encodeURIComponent(selectedTemplateId)}/regions`,
+        "POST",
+        canvasRegionsToQuestions([nextRegion], selectedTemplateId)[0]
+      );
+      applyTemplateMutation(result.template);
+      setSelectedRegionId(result.question.id);
+      setTemplatesState({ status: "success", message: "题区已保存" });
+      setNotice(`已添加并保存${tool.label}区域`);
+    } catch {
+      setTemplatesState({
+        status: "error",
+        message: "题区新增 API 请求失败",
+        detail: "已保留本地画布区域，可稍后批量保存题区。"
+      });
+    }
   }
 
   function updateSelectedRegion(updater: (region: CanvasRegion) => CanvasRegion) {
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接编辑，请先复制新版本");
+      return;
+    }
     setCanvasRegions((current) => current.map((item) => item.id === selectedRegionId ? updater(item) : item));
   }
 
@@ -748,6 +2129,10 @@ function App() {
     mode: "move" | "resize"
   ) {
     event.stopPropagation();
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接拖拽，请先复制新版本");
+      return;
+    }
     setSelectedRegionId(item.id);
     setDragState({
       id: item.id,
@@ -780,13 +2165,103 @@ function App() {
     }));
   }
 
-  function deleteSelectedRegion() {
+  async function finishRegionDrag() {
+    if (!dragState) {
+      return;
+    }
+    const region = canvasRegions.find((item) => item.id === dragState.id);
+    setDragState(null);
+    if (!region || !selectedTemplateId) {
+      return;
+    }
+    try {
+      const result = await writeTemplateRegionToApi(
+        `/api/templates/${encodeURIComponent(selectedTemplateId)}/regions/${encodeURIComponent(region.id)}`,
+        "PUT",
+        canvasRegionsToQuestions([region], selectedTemplateId)[0]
+      );
+      applyTemplateMutation(result.template);
+      setSelectedRegionId(result.question.id);
+      setTemplatesState({ status: "success", message: "题区坐标已保存" });
+    } catch {
+      setTemplatesState({
+        status: "error",
+        message: "题区坐标 API 请求失败",
+        detail: "已保留本地拖拽结果，可稍后批量保存题区。"
+      });
+    }
+  }
+
+  async function saveCurrentRegions() {
+    if (!selectedTemplateId) {
+      setNotice("请先选择要保存题区的模版");
+      return;
+    }
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接保存题区，请先复制新版本");
+      return;
+    }
+    setTemplatesState({ status: "processing", message: "正在保存题区", detail: "批量写入当前画布区域。" });
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(selectedTemplateId)}/regions`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questions: canvasRegionsToQuestions(canvasRegions, selectedTemplateId) })
+      });
+      if (!response.ok) {
+        throw new Error("template regions api failed");
+      }
+      const result = await response.json() as TemplateMutationResponse;
+      applyTemplateMutation(result.template);
+      setTemplatesState({ status: "success", message: "题区已批量保存" });
+      setNotice(`${result.template.name} 的题区已保存到 API`);
+    } catch {
+      const localTemplate = buildCurrentTemplate(selectedTemplateId);
+      const nextTemplates = templates.map((item) => item.id === selectedTemplateId ? localTemplate : item);
+      persistTemplateLibrary(nextTemplates);
+      setTemplatesState({
+        status: "error",
+        message: "题区批量保存 API 请求失败",
+        detail: "已更新本地模版库，可稍后重试 API。"
+      });
+      setNotice(`${localTemplate.name} 的题区已保存到本地模版库`);
+    }
+  }
+
+  async function deleteSelectedRegion() {
     if (!selectedRegionId) {
       return;
     }
+    if (!canEditSelectedTemplate) {
+      setNotice("已发布或停用模版不可直接删除题区，请先复制新版本");
+      return;
+    }
+    const deletingRegionID = selectedRegionId;
     setCanvasRegions((current) => current.filter((item) => item.id !== selectedRegionId));
     setSelectedRegionId("");
     setNotice("已删除选中区域");
+    if (!selectedTemplateId) {
+      return;
+    }
+    try {
+      const response = await fetch(
+        `/api/templates/${encodeURIComponent(selectedTemplateId)}/regions/${encodeURIComponent(deletingRegionID)}`,
+        { method: "DELETE" }
+      );
+      if (!response.ok) {
+        throw new Error("template region delete api failed");
+      }
+      const result = await response.json() as TemplateMutationResponse;
+      applyTemplateMutation(result.template);
+      setTemplatesState({ status: "success", message: "题区已删除" });
+      setNotice("已从 API 删除选中题区");
+    } catch {
+      setTemplatesState({
+        status: "error",
+        message: "题区删除 API 请求失败",
+        detail: "已从本地画布删除，可稍后批量保存题区。"
+      });
+    }
   }
 
   function applySubjective(data: SubjectiveData) {
@@ -803,6 +2278,7 @@ function App() {
       ? `/api/grading/subjective/reviews/${encodeURIComponent(reviewId)}`
       : "/api/grading/subjective/current";
     setIsReviewLoading(true);
+    setSubjectiveState((current) => nextLoadingState(current, "正在加载主观题复核项", "正在切换复核项"));
     try {
       const response = await fetch(endpoint);
       if (response.status === 404) {
@@ -810,6 +2286,11 @@ function App() {
         setSelectedReviewId("");
         setQueueStatus("当前没有待复核主观题");
         setSavedState("队列已清空");
+        setSubjectiveState({
+          status: "empty",
+          message: "暂无待复核主观题",
+          detail: "队列清空后可刷新工作台查看最新任务。"
+        });
         return null;
       }
       if (!response.ok) {
@@ -817,10 +2298,16 @@ function App() {
       }
       const data = await response.json() as SubjectiveData;
       applySubjective(data);
+      setSubjectiveState({ status: "success", message: "复核项已加载" });
       return data;
     } catch {
       applySubjective(fallbackSubjective);
       setQueueStatus("API 未连接，显示本地示例");
+      setSubjectiveState({
+        status: "error",
+        message: "阅卷队列 API 请求失败",
+        detail: "已展示本地主观题示例，可重试连接 Go API。"
+      });
       return fallbackSubjective;
     } finally {
       setIsReviewLoading(false);
@@ -829,6 +2316,7 @@ function App() {
 
   async function openReview(item: ReviewItem) {
     setSavedState("加载中");
+    openView("grading");
     await loadSubjective(item.id);
   }
 
@@ -838,6 +2326,7 @@ function App() {
       return;
     }
     setSavedState("保存中");
+    setSubjectiveState({ status: "processing", message: "正在保存教师裁定", detail: "保存成功后会自动加载下一题。" });
     try {
       const response = await fetch("/api/grading/subjective/decision", {
         method: "POST",
@@ -857,6 +2346,7 @@ function App() {
       const nextDashboard = await loadDashboard();
       if (result.nextReview) {
         applySubjective(result.nextReview);
+        setSubjectiveState({ status: "success", message: "裁定已保存，下一题已加载" });
         setSavedState("已保存，下一题已准备");
         return;
       }
@@ -869,8 +2359,18 @@ function App() {
       setSelectedReviewId("");
       setQueueStatus("当前没有待复核主观题");
       setSavedState("已保存，队列已清空");
+      setSubjectiveState({
+        status: "empty",
+        message: "主观题复核已完成",
+        detail: "当前队列没有待处理题目。"
+      });
     } catch {
       setSavedState("本地已记录，API 未连接");
+      setSubjectiveState({
+        status: "error",
+        message: "教师裁定保存失败",
+        detail: "请检查 API 连接后重试保存。"
+      });
     }
   }
 
@@ -886,25 +2386,24 @@ function App() {
         </div>
 
         <nav className="nav">
-          <button className={activeView === "workspace" ? "active" : ""} onClick={() => openView("workspace")} type="button">
-            <LayoutDashboard size={18} />工作台
-          </button>
-          <button className={activeView === "scan" ? "active" : ""} onClick={() => openView("scan")} type="button">
-            <ScanLine size={18} />扫描导入
-          </button>
-          <button className={activeView === "templates" ? "active" : ""} onClick={() => openView("templates")} type="button">
-            <FileStack size={18} />试卷模板
-          </button>
-          <button className={activeView === "grading" ? "active" : ""} onClick={() => openView("grading")} type="button">
-            <ClipboardCheck size={18} />阅卷中心
-          </button>
-          <button className={activeView === "mistakes" ? "active" : ""} onClick={() => openView("mistakes")} type="button">
-            <BookOpenCheck size={18} />错题集
-          </button>
-          <button className={activeView === "analytics" ? "active" : ""} onClick={() => openView("analytics")} type="button">
-            <UsersRound size={18} />学情分析
-          </button>
+          {visibleNavItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button className={activeView === item.view ? "active" : ""} key={item.view} onClick={() => openView(item.view)} type="button">
+                <Icon size={18} />{item.label}
+              </button>
+            );
+          })}
         </nav>
+
+        <div className="role-card">
+          <div>
+            <span>当前角色</span>
+            <strong>{activeRole.label}</strong>
+            <small>{activeRole.description}</small>
+          </div>
+          <ShieldCheck size={18} />
+        </div>
 
         <div className="sidebar-note">
           <Sparkles size={18} />
@@ -920,15 +2419,30 @@ function App() {
             {activeView !== "templates" ? <span className="top-notice">{notice}</span> : null}
           </div>
           <div className="top-actions">
+            <label className="role-switcher">
+              角色
+              <select onChange={(event: { target: { value: string } }) => switchRole(event.target.value as UserRole)} value={currentRole}>
+                {Object.entries(roleConfig).map(([role, config]) => (
+                  <option key={role} value={role}>{config.label}</option>
+                ))}
+              </select>
+            </label>
             <button className="icon-button" onClick={() => toggleOverlay("filter")} title="筛选" type="button"><SlidersHorizontal size={18} /></button>
             <button className="icon-button" onClick={() => toggleOverlay("notifications")} title="通知" type="button"><Bell size={18} /></button>
-            <button
-              className="primary-button"
-              onClick={activeView === "templates" ? importTemplateScanFromCurrentTask : () => openView("scan")}
-              type="button"
-            >
-              <ScanLine size={18} />导入扫描件
-            </button>
+            {can("template:edit") ? (
+              <button className="secondary-button" onClick={openTemplateCreate} type="button">
+                <FileStack size={18} />新建模板
+              </button>
+            ) : null}
+            {can("scan:create") ? (
+              <button
+                className="primary-button"
+                onClick={activeView === "templates" ? importTemplateScanFromCurrentTask : openScanImport}
+                type="button"
+              >
+                <ScanLine size={18} />导入扫描件
+              </button>
+            ) : null}
           </div>
           {overlay ? (
             <div className="floating-panel">
@@ -936,33 +2450,45 @@ function App() {
                 <>
                   <p className="eyebrow">Filters</p>
                   <h3>工作台筛选</h3>
-                  <button className="template-chip active" onClick={() => setNotice("已筛选六年级 3 班")} type="button">六年级 3 班</button>
-                  <button className="template-chip" onClick={() => setNotice("已筛选今日任务")} type="button">今日任务</button>
-                  <button className="template-chip" onClick={() => setNotice("已筛选主观题优先")} type="button">主观题优先</button>
+                  <button className="template-chip active" onClick={() => applyWorkspaceFilter("class")} type="button">六年级 3 班</button>
+                  <button className="template-chip" onClick={() => applyWorkspaceFilter("today")} type="button">今日任务</button>
+                  <button className="template-chip" onClick={() => applyWorkspaceFilter("review")} type="button">主观题优先</button>
                 </>
               ) : (
                 <>
                   <p className="eyebrow">Notifications</p>
                   <h3>待处理提醒</h3>
-                  <div className="notice-row">主观题待复核：{dashboard.reviewQueue.length} 条</div>
-                  <div className="notice-row">扫描队列：{dashboard.scanQueue.length} 个任务</div>
-                  <div className="notice-row">学生风险：{analytics.studentRisks.length} 条</div>
+                  <button className="notice-row notice-action" onClick={openReviewQueue} type="button">主观题待复核：{dashboard.reviewQueue.length} 条</button>
+                  <button className="notice-row notice-action" onClick={openScanImport} type="button">扫描队列：{dashboard.scanQueue.length} 个任务</button>
+                  <button className="notice-row notice-action" onClick={openAnalyticsView} type="button">学生风险：{analytics.studentRisks.length} 条</button>
                 </>
               )}
             </div>
           ) : null}
         </header>
 
+        <ConnectionStatusBar
+          apiStatus={activeConnection.apiStatus}
+          databaseStatus={activeConnection.databaseStatus}
+          note={activeConnection.note}
+          storageStatus={activeConnection.storageStatus}
+        />
+
         {activeView !== "templates" ? (
-          <section className="metrics-grid">
-            {dashboard.metrics.map((metric) => (
-              <article className={`metric metric-${metric.tone}`} key={metric.label}>
-                <span>{metric.label}</span>
-                <strong>{metric.value}</strong>
-                <small>{metric.delta}</small>
-              </article>
-            ))}
-          </section>
+          <>
+            <RequestStateView state={dashboardState} onRetry={() => loadDashboard()} compact />
+            {dashboard.metrics.length > 0 ? (
+              <section className="metrics-grid">
+                {dashboard.metrics.map((metric) => (
+                  <button className={`metric metric-${metric.tone}`} key={metric.label} onClick={() => openMetricTarget(metric.label)} type="button">
+                    <span>{metric.label}</span>
+                    <strong>{metric.value}</strong>
+                    <small>{metric.delta}</small>
+                  </button>
+                ))}
+              </section>
+            ) : null}
+          </>
         ) : null}
 
         {activeView === "scan" ? (
@@ -976,7 +2502,7 @@ function App() {
             </div>
             <div className="form-grid">
               <label>
-                试卷名称
+                考试/作业名称
                 <input onChange={(event: { target: { value: string } }) => setScanTitle(event.target.value)} value={scanTitle} />
               </label>
               <label>
@@ -984,98 +2510,331 @@ function App() {
                 <input onChange={(event: { target: { value: string } }) => setScanClassName(event.target.value)} value={scanClassName} />
               </label>
               <label>
+                绑定模板
+                <select onChange={(event: { target: { value: string } }) => setScanTemplateId(event.target.value)} value={scanTemplateId}>
+                  <option value="">请选择模板</option>
+                  {publishedTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} · V{template.version ?? 1}
+                    </option>
+                  ))}
+                </select>
+                {publishedTemplates.length === 0 ? <span className="form-hint">请先在模板库发布模板</span> : null}
+              </label>
+              <label>
                 页数
                 <input min={1} onChange={(event: { target: { value: string } }) => setScanPages(Number(event.target.value))} type="number" value={scanPages} />
+              </label>
+              <label className="wide-field">
+                备注
+                <textarea onChange={(event: { target: { value: string } }) => setScanNotes(event.target.value)} rows={3} value={scanNotes} />
               </label>
             </div>
             <div className="upload-zone">
               <ScanLine size={28} />
               <strong>扫描件暂存区</strong>
-              <span>当前先模拟导入任务，后续接 OBS/MinIO 上传和 OCR Worker。</span>
+              <span>支持 PDF、PNG、JPG、WebP 和 ZIP 扫描包，单文件不超过 {formatFileSize(maxScanFileSizeBytes)}。</span>
+              <input
+                accept={allowedScanExtensions.join(",")}
+                multiple
+                onChange={(event: { target: { files: FileList | null } }) => selectScanFiles(event.target.files)}
+                type="file"
+              />
+              {scanFileError ? <span className="form-error">{scanFileError}</span> : null}
+              {scanFiles.length > 0 ? (
+                <div className="selected-files">
+                  {scanFiles.map((file) => (
+                    <span key={`${file.name}-${file.size}`}>{file.name} · {formatFileSize(file.size)}</span>
+                  ))}
+                </div>
+              ) : null}
+              {scanUploadedFiles.length > 0 ? (
+                <div className="selected-files uploaded">
+                  {scanUploadedFiles.map((file) => (
+                    <span key={file.key}>{file.fileName} · {file.key}</span>
+                  ))}
+                </div>
+              ) : null}
               <div className="top-actions">
-                <button className="secondary-button" onClick={() => setNotice("已选择本地扫描件样例")} type="button">选择文件</button>
                 <button className="primary-button" onClick={submitScanImport} type="button">开始导入</button>
               </div>
             </div>
-            <div className="scan-list">
-              {dashboard.scanQueue.map((job) => (
-                <div className="scan-row" key={job.id}>
-                  <div>
-                    <strong>{job.title}</strong>
-                    <span>{job.className} · {job.pages} 页 · {job.status}</span>
-                  </div>
-                  <div className="progress-wrap" aria-label={`${job.progress}%`}>
-                    <div className="progress-track">
-                      <div className="progress-fill" style={{ width: `${job.progress}%` }} />
+            <TableToolbar
+              batchLabel="批量重试"
+              filterOptions={[
+                { label: "全部状态", value: "all" },
+                { label: "识别中", value: "识别" },
+                { label: "等待", value: "等待" },
+                { label: "待导入", value: "待导入" },
+                { label: "待 OCR", value: "待 OCR" }
+              ]}
+              filterValue={scanFilter}
+              onBatchAction={retrySelectedScanTasks}
+              onFilterChange={(value) => {
+                setScanFilter(value);
+                setScanPage(1);
+              }}
+              onSearchChange={(value) => {
+                setScanSearch(value);
+                setScanPage(1);
+              }}
+              onSortChange={(value) => {
+                setScanSort(value);
+                setScanPage(1);
+              }}
+              searchPlaceholder="试卷、班级或状态"
+              searchValue={scanSearch}
+              selectedCount={selectedScanIds.length}
+              sortOptions={[
+                { label: "进度高到低", value: "progress_desc" },
+                { label: "进度低到高", value: "progress_asc" },
+                { label: "页数多到少", value: "pages_desc" }
+              ]}
+              sortValue={scanSort}
+              totalCount={filteredScanQueue.length}
+            />
+            <div className="scan-list table-list">
+              {filteredScanQueue.length > 0 ? (
+                pagedScanQueue.map((job) => (
+                  <div className="scan-row table-row" key={job.id}>
+                    <input
+                      aria-label={`选择${job.title}`}
+                      checked={selectedScanIds.includes(job.id)}
+                      onChange={() => toggleSelected(job.id, selectedScanIds, setSelectedScanIds)}
+                      type="checkbox"
+                    />
+                    <div>
+                      <strong>{job.title}</strong>
+                      <span>
+                        {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
+                        {job.templateId ? ` · 模板 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
+                      </span>
+                      {job.failureReason ? <small className="row-error">{job.failureReason}</small> : null}
                     </div>
-                    <em>{job.progress}%</em>
+                    <div className="progress-wrap" aria-label={`${job.progress}%`}>
+                      <div className="progress-track">
+                        <div className="progress-fill" style={{ width: `${job.progress}%` }} />
+                      </div>
+                      <em>{job.progress}%</em>
+                    </div>
+                    <div className="row-actions">
+                      <button className="template-chip" onClick={() => void openScanPreview(job)} type="button">预览</button>
+                      <button className="template-chip" onClick={() => void retryScanTask(job)} type="button">重试</button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              ) : (
+                <RequestStateView
+                  compact
+                  onRetry={() => loadDashboard()}
+                  state={{ status: "empty", message: "没有符合条件的扫描任务", detail: "调整搜索或筛选条件后重试。" }}
+                />
+              )}
             </div>
+            <TablePagination page={scanPage} total={filteredScanQueue.length} onPageChange={setScanPage} />
+            {scanPreviewTask ? (
+              <div className="scan-preview">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">Scan Preview</p>
+                    <h3>{scanPreviewTask.title} · 文件预览</h3>
+                  </div>
+                  <button className="ghost-button" onClick={() => setScanPreviewTask(null)} type="button">关闭预览</button>
+                </div>
+                {scanPreviewFiles.length > 0 ? (
+                  <div className="preview-file-list">
+                    {scanPreviewFiles.map((file) => (
+                      <div className="preview-file-row" key={file.key}>
+                        <div>
+                          <strong>{file.fileName}</strong>
+                          <span>第 {file.page ?? "-"} 页 · {file.status ?? "uploaded"} · {scanMatchLabel(file.matchStatus)}</span>
+                          {file.failureReason ? <small className="row-error">{file.failureReason}</small> : null}
+                        </div>
+                        <a className="template-chip" href={file.url || "#"} rel="noreferrer" target="_blank">查看原件</a>
+                        <label>
+                          匹配学生
+                          <input
+                            onChange={(event: { target: { value: string } }) => setScanMatchNames((current) => ({ ...current, [file.key]: event.target.value }))}
+                            value={scanMatchNames[file.key] ?? file.studentName ?? ""}
+                          />
+                        </label>
+                        <button className="template-chip active" onClick={() => void matchScanFile(scanPreviewTask, file)} type="button">确认匹配</button>
+                        <button className="template-chip" onClick={() => void retryScanTask(scanPreviewTask, file.key)} type="button">重试文件</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <RequestStateView
+                    compact
+                    state={{ status: "empty", message: "暂无扫描文件", detail: "任务文件上传完成后会在这里预览原件和匹配结果。" }}
+                  />
+                )}
+              </div>
+            ) : null}
           </section>
         ) : null}
 
-        {activeView === "workspace" ? (
+        {activeView === "workspace" && (can("scan:create") || can("grading:review")) ? (
         <section className="work-grid">
+          {can("scan:create") ? (
           <div className="panel">
             <div className="panel-head">
               <div>
                 <p className="eyebrow">Scan Queue</p>
                 <h2>扫描处理队列</h2>
               </div>
-              <button className="ghost-button" onClick={() => openView("scan")} type="button">查看全部</button>
+              <button className="ghost-button" onClick={openScanImport} type="button">查看全部</button>
             </div>
-            <div className="scan-list">
-              {dashboard.scanQueue.map((job) => (
-                <div className="scan-row" key={job.id}>
-                  <div>
-                    <strong>{job.title}</strong>
-                    <span>{job.className} · {job.pages} 页 · {job.status}</span>
-                  </div>
-                  <div className="progress-wrap" aria-label={`${job.progress}%`}>
-                    <div className="progress-track">
-                      <div className="progress-fill" style={{ width: `${job.progress}%` }} />
+            <TableToolbar
+              batchLabel="批量重试"
+              filterOptions={[
+                { label: "全部状态", value: "all" },
+                { label: "识别中", value: "识别" },
+                { label: "等待", value: "等待" },
+                { label: "待导入", value: "待导入" },
+                { label: "待 OCR", value: "待 OCR" }
+              ]}
+              filterValue={scanFilter}
+              onBatchAction={retrySelectedScanTasks}
+              onFilterChange={(value) => {
+                setScanFilter(value);
+                setScanPage(1);
+              }}
+              onSearchChange={(value) => {
+                setScanSearch(value);
+                setScanPage(1);
+              }}
+              onSortChange={(value) => {
+                setScanSort(value);
+                setScanPage(1);
+              }}
+              searchPlaceholder="试卷、班级或状态"
+              searchValue={scanSearch}
+              selectedCount={selectedScanIds.length}
+              sortOptions={[
+                { label: "进度高到低", value: "progress_desc" },
+                { label: "进度低到高", value: "progress_asc" },
+                { label: "页数多到少", value: "pages_desc" }
+              ]}
+              sortValue={scanSort}
+              totalCount={filteredScanQueue.length}
+            />
+            <div className="scan-list table-list">
+              {filteredScanQueue.length > 0 ? (
+                pagedScanQueue.map((job) => (
+                  <div className="scan-row table-row" key={job.id}>
+                    <input
+                      aria-label={`选择${job.title}`}
+                      checked={selectedScanIds.includes(job.id)}
+                      onChange={() => toggleSelected(job.id, selectedScanIds, setSelectedScanIds)}
+                      type="checkbox"
+                    />
+                    <div>
+                      <strong>{job.title}</strong>
+                      <span>
+                        {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
+                        {job.templateId ? ` · 模板 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
+                      </span>
+                      {job.failureReason ? <small className="row-error">{job.failureReason}</small> : null}
                     </div>
-                    <em>{job.progress}%</em>
+                    <div className="progress-wrap" aria-label={`${job.progress}%`}>
+                      <div className="progress-track">
+                        <div className="progress-fill" style={{ width: `${job.progress}%` }} />
+                      </div>
+                      <em>{job.progress}%</em>
+                    </div>
+                    <div className="row-actions">
+                      <button className="template-chip" onClick={() => void openScanPreview(job)} type="button">预览</button>
+                      <button className="template-chip" onClick={() => void retryScanTask(job)} type="button">重试</button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              ) : (
+                <RequestStateView
+                  compact
+                  onRetry={() => loadDashboard()}
+                  state={{ status: "empty", message: "没有符合条件的扫描任务", detail: "调整搜索或筛选条件后重试。" }}
+                />
+              )}
             </div>
+            <TablePagination page={scanPage} total={filteredScanQueue.length} onPageChange={setScanPage} />
           </div>
+          ) : null}
 
+          {can("grading:review") ? (
           <div className="panel">
             <div className="panel-head">
               <div>
                 <p className="eyebrow">Review Queue</p>
                 <h2>主观题复核</h2>
               </div>
-              <button className="ghost-button" onClick={() => openView("grading")} type="button"><PenLine size={16} />进入阅卷</button>
+              <button className="ghost-button" onClick={openReviewQueue} type="button"><PenLine size={16} />进入阅卷</button>
             </div>
-            <div className="review-list">
-              {dashboard.reviewQueue.length > 0 ? (
-                dashboard.reviewQueue.map((item) => (
-                  <button
-                    className={item.id === selectedReview?.id ? "review-row active" : "review-row"}
-                    key={item.id}
-                    onClick={() => openReview(item)}
-                    type="button"
-                  >
-                    <span>{item.studentName}</span>
-                    <strong>第 {item.questionNo} 题</strong>
-                    <em>{item.aiAdvice}</em>
-                    <small>置信度 {item.confidence}%</small>
-                  </button>
+            <TableToolbar
+              batchLabel="批量分配"
+              filterOptions={[
+                { label: "全部置信度", value: "all" },
+                { label: "高置信度", value: "high" },
+                { label: "需重点看", value: "low" }
+              ]}
+              filterValue={reviewFilter}
+              onBatchAction={() => runBatchAction("复核队列批量操作", selectedReviewIds.length)}
+              onFilterChange={(value) => {
+                setReviewFilter(value);
+                setReviewPage(1);
+              }}
+              onSearchChange={(value) => {
+                setReviewSearch(value);
+                setReviewPage(1);
+              }}
+              onSortChange={(value) => {
+                setReviewSort(value);
+                setReviewPage(1);
+              }}
+              searchPlaceholder="学生、试卷或题号"
+              searchValue={reviewSearch}
+              selectedCount={selectedReviewIds.length}
+              sortOptions={[
+                { label: "置信度高到低", value: "confidence_desc" },
+                { label: "题号升序", value: "question_asc" },
+                { label: "学生姓名", value: "student_asc" }
+              ]}
+              sortValue={reviewSort}
+              totalCount={filteredReviewQueue.length}
+            />
+            <div className="review-list table-list">
+              {filteredReviewQueue.length > 0 ? (
+                pagedReviewQueue.map((item) => (
+                  <div className={item.id === selectedReview?.id ? "review-row table-row active" : "review-row table-row"} key={item.id}>
+                    <input
+                      aria-label={`选择${item.studentName}第${item.questionNo}题`}
+                      checked={selectedReviewIds.includes(item.id)}
+                      onChange={() => toggleSelected(item.id, selectedReviewIds, setSelectedReviewIds)}
+                      type="checkbox"
+                    />
+                    <button className="review-row-main" onClick={() => openReview(item)} type="button">
+                      <span>{item.studentName}</span>
+                      <strong>第 {item.questionNo} 题</strong>
+                      <em>{item.aiAdvice}</em>
+                      <small>置信度 {item.confidence}%</small>
+                    </button>
+                  </div>
                 ))
               ) : (
-                <div className="empty-state">暂无待复核主观题</div>
+                <RequestStateView
+                  compact
+                  onRetry={() => loadDashboard()}
+                  state={{ status: "empty", message: "没有符合条件的复核项", detail: "调整搜索或筛选条件后重试。" }}
+                />
               )}
             </div>
+            <TablePagination page={reviewPage} total={filteredReviewQueue.length} onPageChange={setReviewPage} />
           </div>
+          ) : null}
         </section>
         ) : null}
 
-        {activeView === "workspace" || activeView === "grading" ? (
+        {can("grading:review") && (activeView === "workspace" || activeView === "grading") ? (
         <section className="grading-panel">
           {subjective ? (
             <>
@@ -1090,6 +2849,7 @@ function App() {
                   <button className={activeMode === "template" ? "active" : ""} onClick={() => setActiveMode("template")}>模板信息</button>
                 </div>
               </div>
+              <RequestStateView state={subjectiveState} onRetry={() => loadSubjective(selectedReviewId)} compact />
 
               {activeMode === "review" ? (
                 <div className={isReviewLoading ? "split-review loading" : "split-review"}>
@@ -1154,11 +2914,15 @@ function App() {
                       批注
                       <textarea onChange={(event: { target: { value: string } }) => setNote(event.target.value)} value={note} />
                     </label>
-                    <div className="decision-actions">
-                      <button className="primary-button" onClick={() => saveDecision("accepted_ai")}><Check size={18} />接受 AI</button>
-                      <button className="secondary-button" onClick={() => saveDecision("modified")}><PenLine size={18} />修改保存</button>
-                      <button className="ghost-button" onClick={() => saveDecision("rejected")}>驳回建议</button>
-                    </div>
+                    {can("grading:decide") ? (
+                      <div className="decision-actions">
+                        <button className="primary-button" onClick={() => saveDecision("accepted_ai")}><Check size={18} />接受 AI</button>
+                        <button className="secondary-button" onClick={() => saveDecision("modified")}><PenLine size={18} />修改保存</button>
+                        <button className="ghost-button" onClick={() => saveDecision("rejected")}>驳回建议</button>
+                      </div>
+                    ) : (
+                      <div className="permission-note">当前角色仅可查看复核内容，不能保存教师裁定。</div>
+                    )}
                     <span className="save-state">{savedState}</span>
                   </aside>
                 </div>
@@ -1196,7 +2960,9 @@ function App() {
                       满分 {selectedTemplateQuestion?.score ?? subjective.fullScore} 分
                     </p>
                     <p>知识点：{(selectedTemplateQuestion?.knowledge ?? subjective.standardAnswer.knowledge).join("、")}</p>
-                    <button className="secondary-button" onClick={() => openView("templates")} type="button"><FileStack size={18} />编辑模板</button>
+                    {can("template:edit") ? (
+                      <button className="secondary-button" onClick={() => openView("templates")} type="button"><FileStack size={18} />编辑模板</button>
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -1204,9 +2970,11 @@ function App() {
           ) : (
             <div className="empty-review">
               <ClipboardCheck size={34} />
-              <h2>主观题复核已完成</h2>
-              <p>{queueStatus}</p>
-              <button className="secondary-button" onClick={() => loadDashboard()}>刷新工作台</button>
+              <RequestStateView
+                compact
+                onRetry={() => loadSubjective()}
+                state={subjectiveState.status === "empty" ? subjectiveState : { status: "empty", message: "主观题复核已完成", detail: queueStatus }}
+              />
             </div>
           )}
         </section>
@@ -1220,10 +2988,23 @@ function App() {
                 <h2>{canvasTitle}</h2>
                 <span>{selectedPaperSource?.source ?? "未选择来源"} · {canvasSize.label} · {canvasSize.width} x {canvasSize.height} · 缩放 {Math.round(canvasZoom * 100)}%</span>
               </div>
-              <button className="secondary-button" onClick={() => setNotice("AI 拆卷建议已生成，等待教师确认")} type="button">
-                <Sparkles size={18} />AI 拆卷建议
-              </button>
+              {can("template:ai") ? (
+                <button className="secondary-button" onClick={() => void generateTemplateAISuggestions()} type="button">
+                  <Sparkles size={18} />AI 拆卷建议
+                </button>
+              ) : null}
             </div>
+            <RequestStateView state={templatesState} onRetry={() => loadTemplates()} compact />
+            {can("template:ai") && aiSuggestionState.status !== "empty" ? (
+              <div className="ai-suggestion-bar">
+                <RequestStateView state={aiSuggestionState} compact />
+                {aiSuggestedRegions.length > 0 ? (
+                  <button className="primary-button" disabled={!canEditSelectedTemplate} onClick={() => void confirmTemplateAISuggestions()} type="button">
+                    <Check size={18} />确认写入模板库
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <div className="template-editor">
               <div className="canvas-shell">
                 <div className="canvas-toolbar">
@@ -1265,9 +3046,13 @@ function App() {
                 <div className="canvas-viewport">
                   <div
                     className="editable-paper-canvas"
-                    onClick={addRegionAt}
-                    onPointerMove={moveRegionDrag}
-                    onPointerUp={() => setDragState(null)}
+	                    onClick={(event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) => {
+	                      if (can("template:edit") && canEditSelectedTemplate) {
+	                        void addRegionAt(event);
+	                      }
+	                    }}
+	                    onPointerMove={moveRegionDrag}
+	                    onPointerUp={() => void finishRegionDrag()}
                     ref={setCanvasElement}
                     style={{
                       height: `${canvasSize.height * canvasZoom}px`,
@@ -1311,16 +3096,18 @@ function App() {
               <div className="template-side">
                 <h3>试卷来源</h3>
                 <div className="source-toggle">
-                  <button
-                    className={templateSourceMode === "scan" ? "active" : ""}
-                    onClick={() => {
-                      setTemplateSourceMode("scan");
-                      importTemplateScanFromCurrentTask();
-                    }}
-                    type="button"
-                  >
-                    导入扫描件
-                  </button>
+                  {can("scan:create") ? (
+                    <button
+                      className={templateSourceMode === "scan" ? "active" : ""}
+                      onClick={() => {
+                        setTemplateSourceMode("scan");
+                        importTemplateScanFromCurrentTask();
+                      }}
+                      type="button"
+                    >
+                      导入扫描件
+                    </button>
+                  ) : null}
                   <button
                     className={templateSourceMode === "library" ? "active" : ""}
                     onClick={() => setTemplateSourceMode("library")}
@@ -1346,24 +3133,83 @@ function App() {
                   </div>
                 ) : null}
                 <h3>模版库</h3>
+                <TableToolbar
+                  batchLabel="批量发布"
+	                  filterOptions={[
+	                    { label: "全部模板", value: "all" },
+	                    { label: "草稿", value: "status:draft" },
+	                    { label: "已发布", value: "status:published" },
+	                    { label: "停用", value: "status:disabled" },
+	                    { label: "数学", value: "数学" },
+	                    { label: "六年级", value: "六年级" }
+	                  ]}
+                  filterValue={templateFilter}
+                  onBatchAction={() => runBatchAction("模板库批量操作", selectedTemplateIds.length)}
+                  onFilterChange={(value) => {
+                    setTemplateFilter(value);
+                    setTemplatePage(1);
+                  }}
+                  onSearchChange={(value) => {
+                    setTemplateSearch(value);
+                    setTemplatePage(1);
+                  }}
+                  onSortChange={(value) => {
+                    setTemplateSort(value);
+                    setTemplatePage(1);
+                  }}
+                  searchPlaceholder="模板名称、年级或学科"
+                  searchValue={templateSearch}
+                  selectedCount={selectedTemplateIds.length}
+                  sortOptions={[
+                    { label: "名称升序", value: "name_asc" },
+                    { label: "总分高到低", value: "score_desc" },
+                    { label: "题数多到少", value: "questions_desc" }
+                  ]}
+                  sortValue={templateSort}
+                  totalCount={filteredTemplates.length}
+                />
                 <div className="template-library-list">
-                  {templates.length > 0 ? (
-                    templates.map((template) => (
-                      <div className={template.id === selectedTemplateId ? "library-card active" : "library-card"} key={template.id}>
-                        <button className="library-card-main" onClick={() => applyTemplateFromLibrary(template)} type="button">
-                          <strong>{template.name}</strong>
-                          <span>{template.grade} · {template.subject} · {template.questionCount} 题 · {template.totalScore} 分</span>
-                        </button>
-                        <div className="library-actions">
-                          <button className="template-chip active" onClick={() => applyTemplateFromLibrary(template)} type="button">引用</button>
-                          <button className="template-chip" onClick={() => deleteTemplateFromLibrary(template.id)} type="button">删除</button>
+                  {filteredTemplates.length > 0 ? (
+                    pagedTemplates.map((template) => (
+                      <div className={template.id === selectedTemplateId ? "library-card table-row active" : "library-card table-row"} key={template.id}>
+                        <input
+                          aria-label={`选择${template.name}`}
+                          checked={selectedTemplateIds.includes(template.id)}
+                          onChange={() => toggleSelected(template.id, selectedTemplateIds, setSelectedTemplateIds)}
+                          type="checkbox"
+                        />
+	                        <button className="library-card-main" onClick={() => applyTemplateFromLibrary(template)} type="button">
+	                          <strong>{template.name}</strong>
+	                          <span>{template.grade} · {template.subject} · V{template.version ?? 1} · {template.questionCount} 题 · {template.totalScore} 分</span>
+	                          <em className={`status-pill ${normalizeTemplateStatus(template.status)}`}>{templateStatusLabels[normalizeTemplateStatus(template.status)]}</em>
+	                        </button>
+	                        <div className="library-actions">
+	                          <button className="template-chip active" onClick={() => applyTemplateFromLibrary(template)} type="button">引用</button>
+	                          <button className="template-chip" onClick={() => copyTemplateFromLibrary(template.id)} type="button">复制新版本</button>
+	                          {normalizeTemplateStatus(template.status) === "draft" ? (
+	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "published")} type="button">发布</button>
+	                          ) : null}
+	                          {normalizeTemplateStatus(template.status) === "published" ? (
+	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "disabled")} type="button">停用</button>
+	                          ) : null}
+	                          {normalizeTemplateStatus(template.status) === "disabled" ? (
+	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "draft")} type="button">转草稿</button>
+	                          ) : null}
+	                          {can("template:delete") ? (
+	                            <button className="template-chip" onClick={() => deleteTemplateFromLibrary(template.id)} type="button">删除</button>
+	                          ) : null}
                         </div>
                       </div>
                     ))
                   ) : (
-                    <div className="empty-state">暂无可用模版</div>
+                    <RequestStateView
+                      compact
+                      onRetry={() => loadTemplates()}
+                      state={{ status: "empty", message: "没有符合条件的模版", detail: "调整搜索或筛选条件后重试。" }}
+                    />
                   )}
                 </div>
+                <TablePagination page={templatePage} total={filteredTemplates.length} onPageChange={setTemplatePage} />
                 <h3>模板设置</h3>
                 <div className="region-style-editor">
                   <label>
@@ -1374,9 +3220,11 @@ function App() {
                     />
                   </label>
                 </div>
-                <p>模版库总数：{templates.length} 个</p>
-                <p>区域数量：{canvasRegions.length} 个</p>
-                <p>当前题区：{selectedCanvasRegion ? `${selectedCanvasRegion.no} · ${selectedCanvasRegion.label}` : "未选择"}</p>
+	                <p>模版库总数：{templates.length} 个</p>
+	                <p>当前状态：{templateStatusLabels[selectedTemplateStatus]} · V{selectedTemplate?.version ?? 1}</p>
+	                <p>来源文件：{selectedTemplate?.sourceFileUrl || "未绑定"}</p>
+	                <p>区域数量：{canvasRegions.length} 个</p>
+	                <p>当前题区：{selectedCanvasRegion ? `${selectedCanvasRegion.no} · ${selectedCanvasRegion.label}` : "未选择"}</p>
                 <div className="region-style-editor">
                   <label>
                     边框颜色
@@ -1397,10 +3245,84 @@ function App() {
                       <option value="solid">实线</option>
                       <option value="dashed">虚线</option>
                       <option value="dotted">点线</option>
-                    </select>
-                  </label>
-                </div>
-                <h3>草稿箱</h3>
+	                    </select>
+	                  </label>
+	                </div>
+	                <h3>题目结构</h3>
+	                <div className="question-config-editor">
+	                  <label>
+	                    题号
+	                    <input
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, no: event.target.value }))}
+	                      value={selectedCanvasRegion?.no ?? ""}
+	                    />
+	                  </label>
+	                  <label>
+	                    题型
+	                    <select
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      onChange={(event: { target: { value: string } }) => {
+	                        const nextType = event.target.value as TemplateTool;
+	                        const nextTool = templateTools[nextType];
+	                        updateSelectedRegion((item) => ({
+	                          ...item,
+	                          type: nextType,
+	                          label: nextTool.label,
+	                          color: nextTool.color,
+	                          score: item.score || (nextType === "subjective" ? 10 : 2)
+	                        }));
+	                      }}
+	                      value={selectedCanvasRegion?.type ?? "subjective"}
+	                    >
+	                      <option value="choice">选择题</option>
+	                      <option value="judge">判断题</option>
+	                      <option value="objective">客观题</option>
+	                      <option value="subjective">主观题</option>
+	                    </select>
+	                  </label>
+	                  <label>
+	                    分值
+	                    <input
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      min="0"
+	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, score: Number(event.target.value) || 0 }))}
+	                      type="number"
+	                      value={selectedCanvasRegion?.score ?? 0}
+	                    />
+	                  </label>
+	                  <label>
+	                    标准答案
+	                    <textarea
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, standardAnswer: event.target.value }))}
+	                      rows={3}
+	                      value={selectedCanvasRegion?.standardAnswer ?? ""}
+	                    />
+	                  </label>
+	                  <label>
+	                    采分点
+	                    <textarea
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, scoringRules: event.target.value.split("\n").map((line) => line.trim()).filter(Boolean) }))}
+	                      rows={3}
+	                      value={(selectedCanvasRegion?.scoringRules ?? []).join("\n")}
+	                    />
+	                  </label>
+	                  <label>
+	                    知识点
+	                    <textarea
+	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
+	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, knowledge: event.target.value.split(/[，,\n]/).map((line) => line.trim()).filter(Boolean) }))}
+	                      rows={2}
+	                      value={(selectedCanvasRegion?.knowledge ?? []).join("，")}
+	                    />
+	                  </label>
+	                  {!canEditSelectedTemplate ? (
+	                    <div className="permission-note">当前模板已发布或停用，请复制新版本后编辑题目结构。</div>
+	                  ) : null}
+	                </div>
+	                <h3>草稿箱</h3>
                 <div className="draft-list">
                   {templateDrafts.length > 0 ? (
                     templateDrafts.map((draft) => (
@@ -1411,14 +3333,27 @@ function App() {
                       </button>
                     ))
                   ) : (
-                    <div className="empty-state">暂无草稿</div>
+                    <RequestStateView
+                      compact
+                      state={{ status: "empty", message: "暂无草稿", detail: "保存草稿后可从这里恢复编辑。" }}
+                    />
                   )}
                 </div>
                 <div className="decision-actions">
-                  <button className="secondary-button" onClick={saveCurrentAsTemplate} type="button"><FileStack size={18} />保存为模版</button>
-                  <button className="primary-button" onClick={saveTemplateDraft} type="button"><Check size={18} />保存草稿</button>
-                  <button className="ghost-button" onClick={deleteSelectedRegion} type="button">删除区域</button>
-                  <button className="ghost-button" onClick={() => openView("grading")} type="button">进入阅卷</button>
+                  {can("template:edit") ? (
+                    <>
+	                      <button className="secondary-button" onClick={saveCurrentAsTemplate} type="button"><FileStack size={18} />保存为模版</button>
+		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={updateCurrentTemplate} type="button"><FileStack size={18} />更新模版</button>
+		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={saveCurrentRegions} type="button"><Check size={18} />保存题区</button>
+	                      <button className="primary-button" onClick={saveTemplateDraft} type="button"><Check size={18} />保存草稿</button>
+		                      <button className="ghost-button" disabled={!canEditSelectedTemplate} onClick={() => void deleteSelectedRegion()} type="button">删除区域</button>
+                    </>
+                  ) : (
+                    <div className="permission-note">当前角色仅可查看模板，不能编辑或保存。</div>
+                  )}
+                  {can("grading:review") ? (
+                    <button className="ghost-button" onClick={openReviewQueue} type="button">进入阅卷</button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1433,17 +3368,70 @@ function App() {
                   <p className="eyebrow">Wrong Questions</p>
                   <h2>错题归档</h2>
                 </div>
-                <button className="primary-button" onClick={() => setNotice("已生成本班错题本")} type="button"><BookOpenCheck size={18} />生成错题本</button>
+                {can("mistake:generate") ? (
+                  <button className="primary-button" onClick={() => openMistakeView("high")} type="button"><BookOpenCheck size={18} />生成错题本</button>
+                ) : null}
               </div>
-              {analytics.questionStats.map((item) => (
-                <div className="question-stat-row mistake-stat-row" key={`mistake-${item.no}-${item.type}`}>
-                  <span>第 {item.no} 题 · {item.type}</span>
-                  <div className="accuracy-bar">
-                    <div style={{ width: `${item.accuracy}%` }} />
+              <RequestStateView state={analyticsState} onRetry={() => loadAnalytics()} compact />
+              <TableToolbar
+                batchLabel="批量再练"
+                filterOptions={[
+                  { label: "全部错题", value: "all" },
+                  { label: "高错误率", value: "high" },
+                  { label: "低于 50%", value: "low" }
+                ]}
+                filterValue={mistakeFilter}
+                onBatchAction={() => runBatchAction("错题批量操作", selectedMistakeIds.length)}
+                onFilterChange={(value) => {
+                  setMistakeFilter(value);
+                  setMistakePage(1);
+                }}
+                onSearchChange={(value) => {
+                  setMistakeSearch(value);
+                  setMistakePage(1);
+                }}
+                onSortChange={(value) => {
+                  setMistakeSort(value);
+                  setMistakePage(1);
+                }}
+                searchPlaceholder="题号或题型"
+                searchValue={mistakeSearch}
+                selectedCount={selectedMistakeIds.length}
+                sortOptions={[
+                  { label: "错误率高到低", value: "wrong_desc" },
+                  { label: "题号升序", value: "question_asc" },
+                  { label: "正确率低到高", value: "accuracy_asc" }
+                ]}
+                sortValue={mistakeSort}
+                totalCount={filteredMistakes.length}
+              />
+              {filteredMistakes.length > 0 ? (
+                pagedMistakes.map((item) => {
+                  const rowId = `${item.no}-${item.type}`;
+                  return (
+                  <div className="question-stat-row mistake-stat-row table-row" key={`mistake-${item.no}-${item.type}`}>
+                    <input
+                      aria-label={`选择第${item.no}题`}
+                      checked={selectedMistakeIds.includes(rowId)}
+                      onChange={() => toggleSelected(rowId, selectedMistakeIds, setSelectedMistakeIds)}
+                      type="checkbox"
+                    />
+                    <span>第 {item.no} 题 · {item.type}</span>
+                    <div className="accuracy-bar">
+                      <div style={{ width: `${item.accuracy}%` }} />
+                    </div>
+                    <strong>{100 - item.accuracy}% 错误</strong>
                   </div>
-                  <strong>{100 - item.accuracy}% 错误</strong>
-                </div>
-              ))}
+                  );
+                })
+              ) : (
+                <RequestStateView
+                  compact
+                  onRetry={() => loadAnalytics()}
+                  state={{ status: "empty", message: "没有符合条件的错题", detail: "调整搜索或筛选条件后重试。" }}
+                />
+              )}
+              <TablePagination page={mistakePage} total={filteredMistakes.length} onPageChange={setMistakePage} />
             </div>
             <div className="panel">
               <div className="panel-head">
@@ -1452,13 +3440,21 @@ function App() {
                   <h2>按知识点整理</h2>
                 </div>
               </div>
-              {analytics.knowledgeStats.map((item) => (
-                <button className="knowledge-row row-button" key={`wrong-${item.name}`} onClick={() => setNotice(`已筛选 ${item.name} 错题`)} type="button">
-                  <span>{item.name}</span>
-                  <strong>{item.accuracy}%</strong>
-                  <small>{item.wrongCount} 次错误</small>
-                </button>
-              ))}
+              {analytics.knowledgeStats.length > 0 ? (
+                analytics.knowledgeStats.map((item) => (
+                  <button className="knowledge-row row-button" key={`wrong-${item.name}`} onClick={() => openMistakeView("high")} type="button">
+                    <span>{item.name}</span>
+                    <strong>{item.accuracy}%</strong>
+                    <small>{item.wrongCount} 次错误</small>
+                  </button>
+                ))
+              ) : (
+                <RequestStateView
+                  compact
+                  onRetry={() => loadAnalytics()}
+                  state={{ status: "empty", message: "暂无知识点错题", detail: "知识点统计生成后会显示在这里。" }}
+                />
+              )}
             </div>
           </section>
         ) : null}
@@ -1472,6 +3468,7 @@ function App() {
                 <h2>{analytics.className} 学情概览</h2>
               </div>
             </div>
+            <RequestStateView state={analyticsState} onRetry={() => loadAnalytics()} compact />
             <div className="score-summary">
               <div>
                 <span>平均分</span>
@@ -1487,15 +3484,23 @@ function App() {
               </div>
             </div>
             <div className="question-stat-list">
-              {analytics.questionStats.slice(0, 5).map((item) => (
-                <div className="question-stat-row" key={`${item.no}-${item.type}`}>
-                  <span>第 {item.no} 题 · {item.type}</span>
-                  <div className="accuracy-bar">
-                    <div style={{ width: `${item.accuracy}%` }} />
+              {analytics.questionStats.length > 0 ? (
+                analytics.questionStats.slice(0, 5).map((item) => (
+                  <div className="question-stat-row" key={`${item.no}-${item.type}`}>
+                    <span>第 {item.no} 题 · {item.type}</span>
+                    <div className="accuracy-bar">
+                      <div style={{ width: `${item.accuracy}%` }} />
+                    </div>
+                    <strong>{item.accuracy}%</strong>
                   </div>
-                  <strong>{item.accuracy}%</strong>
-                </div>
-              ))}
+                ))
+              ) : (
+                <RequestStateView
+                  compact
+                  onRetry={() => loadAnalytics()}
+                  state={{ status: "empty", message: "暂无题目统计", detail: "完成阅卷后会显示各题正确率。" }}
+                />
+              )}
             </div>
           </div>
 
@@ -1505,24 +3510,36 @@ function App() {
                 <p className="eyebrow">Weak Points</p>
                 <h2>薄弱点与学生风险</h2>
               </div>
-              <button className="ghost-button" onClick={sendGuardianReminders} type="button"><Send size={16} />提醒家长</button>
+              {can("guardian:remind") ? (
+                <button className="ghost-button" onClick={sendGuardianReminders} type="button"><Send size={16} />提醒家长</button>
+              ) : null}
             </div>
-            {analytics.knowledgeStats.slice(0, 3).map((item) => (
-              <div className="knowledge-row" key={item.name}>
-                <span>{item.name}</span>
-                <strong>{item.accuracy}%</strong>
-                <small>{item.wrongCount} 次错误</small>
-              </div>
-            ))}
-            {analytics.studentRisks.slice(0, 3).map((item) => (
-              <div className="warning-row" key={`${item.studentName}-${item.risk}`}>
-                <div>
-                  <strong>{item.studentName}</strong>
-                  <span>{item.risk}</span>
-                </div>
-                <em>{item.weakness.join("、")}</em>
-              </div>
-            ))}
+            {analytics.knowledgeStats.length > 0 || analytics.studentRisks.length > 0 ? (
+              <>
+                {analytics.knowledgeStats.slice(0, 3).map((item) => (
+                  <div className="knowledge-row" key={item.name}>
+                    <span>{item.name}</span>
+                    <strong>{item.accuracy}%</strong>
+                    <small>{item.wrongCount} 次错误</small>
+                  </div>
+                ))}
+                {analytics.studentRisks.slice(0, 3).map((item) => (
+                  <div className="warning-row" key={`${item.studentName}-${item.risk}`}>
+                    <div>
+                      <strong>{item.studentName}</strong>
+                      <span>{item.risk}</span>
+                    </div>
+                    <em>{item.weakness.join("、")}</em>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <RequestStateView
+                compact
+                onRetry={() => loadAnalytics()}
+                state={{ status: "empty", message: "暂无薄弱点与风险", detail: "统计生成后会显示知识点和学生风险。" }}
+              />
+            )}
           </div>
         </section>
         ) : null}

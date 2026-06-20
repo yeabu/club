@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
@@ -15,16 +17,22 @@ type Store struct {
 	db *sql.DB
 }
 
-func OpenStore(ctx context.Context, config Config) (*Store, error) {
-	rootDSN := mysqlConfig(config, "").FormatDSN()
-	rootDB, err := sql.Open("mysql", rootDSN)
-	if err != nil {
-		return nil, err
-	}
-	defer rootDB.Close()
+var errTemplateLocked = errors.New("template is not draft")
+var errTemplateNotPublished = errors.New("template is not published")
 
-	if _, err := rootDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+config.MySQL.Database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"); err != nil {
-		return nil, err
+func OpenStore(ctx context.Context, config Config) (*Store, error) {
+	autoMigrate := envBool("AUTO_MIGRATE", true)
+	if autoMigrate {
+		rootDSN := mysqlConfig(config, "").FormatDSN()
+		rootDB, err := sql.Open("mysql", rootDSN)
+		if err != nil {
+			return nil, err
+		}
+		defer rootDB.Close()
+
+		if _, err := rootDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+config.MySQL.Database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"); err != nil {
+			return nil, err
+		}
 	}
 
 	dsn := mysqlConfig(config, config.MySQL.Database).FormatDSN()
@@ -42,7 +50,7 @@ func OpenStore(ctx context.Context, config Config) (*Store, error) {
 	}
 
 	store := &Store{db: db}
-	if envBool("AUTO_MIGRATE", true) {
+	if autoMigrate {
 		if err := store.Migrate(ctx); err != nil {
 			_ = db.Close()
 			return nil, err
@@ -89,10 +97,63 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.ensureSchemaPatchColumns(ctx); err != nil {
+		return err
+	}
+	for _, stmt := range schemaPatchStatements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
 	if err := s.ensureSeedConstraints(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
+	columns := []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{table: "paper_templates", column: "version", definition: "INT NOT NULL DEFAULT 1"},
+		{table: "paper_templates", column: "parent_id", definition: "VARCHAR(40) DEFAULT ''"},
+		{table: "paper_templates", column: "source_file_url", definition: "VARCHAR(255) DEFAULT ''"},
+		{table: "question_templates", column: "scoring_rules_json", definition: "JSON NULL AFTER standard_answer"},
+		{table: "scan_jobs", column: "template_id", definition: "VARCHAR(40) DEFAULT '' AFTER class_name"},
+		{table: "scan_jobs", column: "template_version", definition: "INT NOT NULL DEFAULT 1 AFTER template_id"},
+		{table: "scan_jobs", column: "notes", definition: "TEXT AFTER pages"},
+		{table: "scan_jobs", column: "files_json", definition: "JSON NULL AFTER notes"},
+		{table: "scan_jobs", column: "failure_reason", definition: "TEXT AFTER progress"},
+		{table: "scan_jobs", column: "retry_count", definition: "INT NOT NULL DEFAULT 0 AFTER failure_reason"},
+		{table: "scan_jobs", column: "queue_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER retry_count"},
+		{table: "scan_jobs", column: "queue_message", definition: "VARCHAR(255) DEFAULT '' AFTER queue_status"},
+	}
+	for _, item := range columns {
+		exists, err := s.columnExists(ctx, item.table, item.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", item.table, item.column, item.definition)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) columnExists(ctx context.Context, tableName string, columnName string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+			AND TABLE_NAME = ?
+			AND COLUMN_NAME = ?`, tableName, columnName).Scan(&count)
+	return count > 0, err
 }
 
 func (s *Store) Seed(ctx context.Context) error {
@@ -127,6 +188,7 @@ func (s *Store) Dashboard(ctx context.Context) (DashboardResponse, error) {
 	}
 
 	return DashboardResponse{
+		Source: "database",
 		Metrics: []Metric{
 			{Label: "待批试卷", Value: fmt.Sprintf("%d", pendingPages(scanJobs)), Delta: "来自扫描队列", Tone: "primary"},
 			{Label: "主观题待复核", Value: fmt.Sprintf("%d", len(reviews)), Delta: "AI 已预评分", Tone: "warning"},
@@ -142,24 +204,292 @@ func (s *Store) Dashboard(ctx context.Context) (DashboardResponse, error) {
 
 func (s *Store) ScanJobs(ctx context.Context) ([]ScanJob, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, class_name, pages, status, progress
+		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
+			status, progress, COALESCE(failure_reason, ''), retry_count, queue_status, COALESCE(queue_message, '')
 		FROM scan_jobs
 		ORDER BY created_at DESC
-		LIMIT 8`)
+		LIMIT 30`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var jobs []ScanJob
+	jobs := []ScanJob{}
 	for rows.Next() {
 		var job ScanJob
-		if err := rows.Scan(&job.ID, &job.Title, &job.ClassName, &job.Pages, &job.Status, &job.Progress); err != nil {
+		var filesJSON string
+		if err := rows.Scan(
+			&job.ID, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
+			&job.Status, &job.Progress, &job.FailureReason, &job.RetryCount, &job.QueueStatus, &job.QueueMessage,
+		); err != nil {
 			return nil, err
 		}
+		decodeScanFiles(filesJSON, &job.Files)
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (s *Store) ScanTask(ctx context.Context, taskID string) (ScanJob, error) {
+	var job ScanJob
+	var filesJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
+			status, progress, COALESCE(failure_reason, ''), retry_count, queue_status, COALESCE(queue_message, '')
+		FROM scan_jobs
+		WHERE id = ?
+		LIMIT 1`, taskID).Scan(
+		&job.ID, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
+		&job.Status, &job.Progress, &job.FailureReason, &job.RetryCount, &job.QueueStatus, &job.QueueMessage,
+	)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	decodeScanFiles(filesJSON, &job.Files)
+	return job, nil
+}
+
+func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJob, error) {
+	templateVersion := req.TemplateVersion
+	if req.TemplateID != "" {
+		template, err := s.Template(ctx, req.TemplateID)
+		if err != nil {
+			return ScanJob{}, err
+		}
+		if template.Status != "published" {
+			return ScanJob{}, errTemplateNotPublished
+		}
+		templateVersion = template.Version
+	}
+	req.Files = s.matchScanFiles(ctx, req.ClassName, req.Files)
+	filesJSON, err := json.Marshal(req.Files)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	job := ScanJob{
+		ID:              fmt.Sprintf("scan_%d", time.Now().UnixNano()),
+		Title:           req.Title,
+		ClassName:       req.ClassName,
+		TemplateID:      req.TemplateID,
+		TemplateVersion: templateVersion,
+		Pages:           req.Pages,
+		Notes:           req.Notes,
+		Status:          "排队中",
+		Progress:        0,
+		QueueStatus:     "pending",
+		Files:           req.Files,
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO scan_jobs
+			(id, title, class_name, template_id, template_version, pages, notes, files_json, status, progress, failure_reason, retry_count, queue_status, queue_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, '')`,
+		job.ID, job.Title, job.ClassName, job.TemplateID, job.TemplateVersion, job.Pages, job.Notes, string(filesJSON), job.Status, job.Progress, job.QueueStatus,
+	)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	return job, nil
+}
+
+func (s *Store) UpdateScanQueueStatus(ctx context.Context, taskID string, queueStatus string, queueMessage string) error {
+	status := "排队中"
+	failureReason := ""
+	if queueStatus == "failed" {
+		status = "队列投递失败"
+		failureReason = queueMessage
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE scan_jobs
+		SET queue_status = ?, queue_message = ?, status = ?, failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		queueStatus, queueMessage, status, failureReason, taskID,
+	)
+	return err
+}
+
+func (s *Store) UpdateScanTaskStatus(ctx context.Context, taskID string, req ScanTaskStatusRequest) (ScanJob, error) {
+	progress := req.Progress
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	retryCount := req.RetryCount
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE scan_jobs
+		SET status = ?, progress = ?, failure_reason = ?, retry_count = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		req.Status, progress, req.FailureReason, retryCount, taskID,
+	)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ScanJob{}, err
+	}
+	if affected == 0 {
+		return ScanJob{}, sql.ErrNoRows
+	}
+	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) RetryScanTask(ctx context.Context, taskID string, fileKey string) (ScanJob, error) {
+	task, err := s.ScanTask(ctx, taskID)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	files := task.Files
+	for index := range files {
+		if fileKey == "" || files[index].Key == fileKey {
+			files[index].Status = "待重试"
+			files[index].FailureReason = ""
+		}
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE scan_jobs
+		SET status = '排队中',
+			progress = 0,
+			failure_reason = '',
+			retry_count = retry_count + 1,
+			queue_status = 'pending',
+			queue_message = '',
+			files_json = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		string(filesJSON), taskID,
+	)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ScanJob{}, err
+	}
+	if affected == 0 {
+		return ScanJob{}, sql.ErrNoRows
+	}
+	message := "整批任务重试"
+	if fileKey != "" {
+		message = "单文件重试"
+	}
+	if err := s.insertScanTaskLog(ctx, taskID, fileKey, "retry", message); err != nil {
+		log.Printf("scan retry log insert failed: %v", err)
+	}
+	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) MatchScanFile(ctx context.Context, taskID string, req ScanFileMatchRequest) (ScanJob, error) {
+	req.FileKey = strings.TrimSpace(req.FileKey)
+	req.StudentID = strings.TrimSpace(req.StudentID)
+	req.StudentName = strings.TrimSpace(req.StudentName)
+	req.MatchMethod = strings.TrimSpace(req.MatchMethod)
+	if req.MatchMethod == "" {
+		req.MatchMethod = "manual"
+	}
+	task, err := s.ScanTask(ctx, taskID)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	found := false
+	for index := range task.Files {
+		if task.Files[index].Key == req.FileKey {
+			task.Files[index].StudentID = req.StudentID
+			task.Files[index].StudentName = req.StudentName
+			task.Files[index].MatchMethod = req.MatchMethod
+			if req.StudentID == "" && req.StudentName == "" {
+				task.Files[index].MatchStatus = "pending"
+			} else {
+				task.Files[index].MatchStatus = "matched"
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ScanJob{}, sql.ErrNoRows
+	}
+	filesJSON, err := json.Marshal(task.Files)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE scan_jobs SET files_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(filesJSON), taskID); err != nil {
+		return ScanJob{}, err
+	}
+	if err := s.insertScanTaskLog(ctx, taskID, req.FileKey, "match", req.StudentName); err != nil {
+		log.Printf("scan match log insert failed: %v", err)
+	}
+	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) insertScanTaskLog(ctx context.Context, taskID string, fileKey string, action string, message string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO scan_task_logs (task_id, file_key, action, message) VALUES (?, ?, ?, ?)", taskID, fileKey, action, message)
+	return err
+}
+
+func (s *Store) matchScanFiles(ctx context.Context, className string, files []ScanFile) []ScanFile {
+	type student struct {
+		id   string
+		name string
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT students.id, students.name
+		FROM students
+		JOIN classes ON classes.id = students.class_id
+		WHERE classes.name = ?`, className)
+	if err != nil {
+		log.Printf("scan student match query failed: %v", err)
+		return markScanFilesPending(files)
+	}
+	defer rows.Close()
+	students := []student{}
+	for rows.Next() {
+		var item student
+		if err := rows.Scan(&item.id, &item.name); err != nil {
+			log.Printf("scan student match scan failed: %v", err)
+			continue
+		}
+		students = append(students, item)
+	}
+	for index := range files {
+		files[index].Page = index + 1
+		if files[index].Status == "" {
+			files[index].Status = "uploaded"
+		}
+		files[index].MatchStatus = "pending"
+		name := strings.ToLower(files[index].FileName)
+		for _, student := range students {
+			if strings.Contains(name, strings.ToLower(student.name)) {
+				files[index].StudentID = student.id
+				files[index].StudentName = student.name
+				files[index].MatchStatus = "matched"
+				files[index].MatchMethod = "name"
+				break
+			}
+		}
+	}
+	return files
+}
+
+func markScanFilesPending(files []ScanFile) []ScanFile {
+	for index := range files {
+		files[index].Page = index + 1
+		if files[index].Status == "" {
+			files[index].Status = "uploaded"
+		}
+		if files[index].MatchStatus == "" {
+			files[index].MatchStatus = "pending"
+		}
+	}
+	return files
 }
 
 func (s *Store) ReviewQueue(ctx context.Context) ([]ReviewItem, error) {
@@ -174,7 +504,7 @@ func (s *Store) ReviewQueue(ctx context.Context) ([]ReviewItem, error) {
 	}
 	defer rows.Close()
 
-	var reviews []ReviewItem
+	reviews := []ReviewItem{}
 	for rows.Next() {
 		var item ReviewItem
 		var aiScore, fullScore float64
@@ -198,7 +528,7 @@ func (s *Store) WeakPoints(ctx context.Context) ([]KnowledgeStat, error) {
 	}
 	defer rows.Close()
 
-	var stats []KnowledgeStat
+	stats := []KnowledgeStat{}
 	for rows.Next() {
 		var item KnowledgeStat
 		if err := rows.Scan(&item.Name, &item.Accuracy, &item.WrongCount); err != nil {
@@ -221,7 +551,7 @@ func (s *Store) HomeworkWatch(ctx context.Context) ([]HomeworkWatch, error) {
 	}
 	defer rows.Close()
 
-	var items []HomeworkWatch
+	items := []HomeworkWatch{}
 	for rows.Next() {
 		var item HomeworkWatch
 		if err := rows.Scan(&item.StudentName, &item.ClassName, &item.Missing, &item.Guardian); err != nil {
@@ -379,7 +709,7 @@ func (s *Store) ResetDemo(ctx context.Context) (DashboardResponse, error) {
 
 func (s *Store) Templates(ctx context.Context) ([]PaperTemplate, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, subject, grade, question_count, total_score
+		SELECT id, name, subject, grade, question_count, total_score, source_file_url, status, version, parent_id
 		FROM paper_templates
 		ORDER BY updated_at DESC`)
 	if err != nil {
@@ -387,10 +717,10 @@ func (s *Store) Templates(ctx context.Context) ([]PaperTemplate, error) {
 	}
 	defer rows.Close()
 
-	var templates []PaperTemplate
+	templates := []PaperTemplate{}
 	for rows.Next() {
 		var item PaperTemplate
-		if err := rows.Scan(&item.ID, &item.Name, &item.Subject, &item.Grade, &item.QuestionCount, &item.TotalScore); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Subject, &item.Grade, &item.QuestionCount, &item.TotalScore, &item.SourceFileURL, &item.Status, &item.Version, &item.ParentID); err != nil {
 			return nil, err
 		}
 		questions, err := s.TemplateQuestions(ctx, item.ID)
@@ -403,9 +733,193 @@ func (s *Store) Templates(ctx context.Context) ([]PaperTemplate, error) {
 	return templates, rows.Err()
 }
 
+func (s *Store) Template(ctx context.Context, templateID string) (PaperTemplate, error) {
+	var item PaperTemplate
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, subject, grade, question_count, total_score, source_file_url, status, version, parent_id
+		FROM paper_templates
+		WHERE id = ?
+		LIMIT 1`, templateID).Scan(&item.ID, &item.Name, &item.Subject, &item.Grade, &item.QuestionCount, &item.TotalScore, &item.SourceFileURL, &item.Status, &item.Version, &item.ParentID)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	questions, err := s.TemplateQuestions(ctx, item.ID)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	item.Questions = questions
+	return item, nil
+}
+
+func (s *Store) CreateTemplate(ctx context.Context, template PaperTemplate) (PaperTemplate, error) {
+	template.ID = templateRecordID("tpl", template.ID)
+	if template.Status == "" {
+		template.Status = "draft"
+	}
+	if template.Version == 0 {
+		template.Version = 1
+	}
+	return s.saveTemplate(ctx, template, false)
+}
+
+func (s *Store) UpdateTemplate(ctx context.Context, templateID string, template PaperTemplate) (PaperTemplate, error) {
+	template.ID = templateID
+	return s.saveTemplate(ctx, template, true)
+}
+
+func (s *Store) DeleteTemplate(ctx context.Context, templateID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM question_templates WHERE template_id = ?", templateID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM paper_templates WHERE id = ?", templateID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CopyTemplate(ctx context.Context, templateID string) (PaperTemplate, error) {
+	source, err := s.Template(ctx, templateID)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	parentID := source.ParentID
+	if parentID == "" {
+		parentID = source.ID
+	}
+	source.ID = templateRecordID("tpl", "")
+	source.Name = fmt.Sprintf("%s v%d", source.Name, source.Version+1)
+	source.Status = "draft"
+	source.Version++
+	source.ParentID = parentID
+	for index := range source.Questions {
+		source.Questions[index].ID = templateRecordID("q", "")
+	}
+	return s.saveTemplate(ctx, source, false)
+}
+
+func (s *Store) UpdateTemplateStatus(ctx context.Context, templateID string, status string) (PaperTemplate, error) {
+	if !validTemplateStatus(status) {
+		return PaperTemplate{}, fmt.Errorf("invalid template status: %s", status)
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE paper_templates
+		SET status = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, status, templateID)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	if affected == 0 {
+		return PaperTemplate{}, sql.ErrNoRows
+	}
+	return s.Template(ctx, templateID)
+}
+
+func (s *Store) saveTemplate(ctx context.Context, template PaperTemplate, requireExisting bool) (PaperTemplate, error) {
+	if template.Subject == "" {
+		template.Subject = "数学"
+	}
+	if template.Grade == "" {
+		template.Grade = "六年级"
+	}
+	if template.Status == "" {
+		template.Status = "draft"
+	}
+	if template.Version == 0 {
+		template.Version = 1
+	}
+	template.QuestionCount = len(template.Questions)
+	totalScore := 0.0
+	for _, question := range template.Questions {
+		totalScore += question.Score
+	}
+	template.TotalScore = int(totalScore + 0.5)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	defer tx.Rollback()
+
+	if requireExisting {
+		if err := ensureTemplateDraftTx(ctx, tx, template.ID); err != nil {
+			return PaperTemplate{}, err
+		}
+		result, err := tx.ExecContext(ctx, `
+				UPDATE paper_templates
+				SET name = ?, subject = ?, grade = ?, question_count = ?, total_score = ?, source_file_url = ?, status = ?, version = ?, parent_id = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?`,
+			template.Name, template.Subject, template.Grade, template.QuestionCount, template.TotalScore, template.SourceFileURL, template.Status, template.Version, template.ParentID, template.ID,
+		)
+		if err != nil {
+			return PaperTemplate{}, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return PaperTemplate{}, err
+		}
+		if affected == 0 {
+			return PaperTemplate{}, sql.ErrNoRows
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+				INSERT INTO paper_templates (id, name, subject, grade, question_count, total_score, source_file_url, status, version, parent_id)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			template.ID, template.Name, template.Subject, template.Grade, template.QuestionCount, template.TotalScore, template.SourceFileURL, template.Status, template.Version, template.ParentID,
+		); err != nil {
+			return PaperTemplate{}, err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM question_templates WHERE template_id = ?", template.ID); err != nil {
+		return PaperTemplate{}, err
+	}
+	for index, question := range template.Questions {
+		question.ID = templateRecordID("q", question.ID)
+		if question.No == "" {
+			question.No = fmt.Sprintf("%d", index+1)
+		}
+		knowledgeJSON, err := json.Marshal(question.Knowledge)
+		if err != nil {
+			return PaperTemplate{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+				INSERT INTO question_templates
+					(id, template_id, question_no, question_type, score, standard_answer, scoring_rules_json, knowledge_json, page_no, x, y, width, height)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			question.ID, template.ID, question.No, question.Type, question.Score, question.StandardAnswer, scoringRulesJSON(question.ScoringRules), string(knowledgeJSON),
+			question.Region.Page, question.Region.X, question.Region.Y, question.Region.Width, question.Region.Height,
+		); err != nil {
+			return PaperTemplate{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return PaperTemplate{}, err
+	}
+	return s.Template(ctx, template.ID)
+}
+
 func (s *Store) TemplateQuestions(ctx context.Context, templateID string) ([]QuestionTemplate, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, question_no, question_type, score, knowledge_json, page_no, x, y, width, height
+		SELECT id, question_no, question_type, score, COALESCE(standard_answer, ''), COALESCE(scoring_rules_json, JSON_ARRAY()), knowledge_json, page_no, x, y, width, height
 		FROM question_templates
 		WHERE template_id = ?
 		ORDER BY page_no ASC, question_no + 0 ASC`, templateID)
@@ -414,24 +928,248 @@ func (s *Store) TemplateQuestions(ctx context.Context, templateID string) ([]Que
 	}
 	defer rows.Close()
 
-	var questions []QuestionTemplate
+	questions := []QuestionTemplate{}
 	for rows.Next() {
 		var item QuestionTemplate
 		var knowledgeJSON string
-		if err := rows.Scan(&item.ID, &item.No, &item.Type, &item.Score, &knowledgeJSON, &item.Region.Page, &item.Region.X, &item.Region.Y, &item.Region.Width, &item.Region.Height); err != nil {
+		var scoringRulesJSON string
+		if err := rows.Scan(&item.ID, &item.No, &item.Type, &item.Score, &item.StandardAnswer, &scoringRulesJSON, &knowledgeJSON, &item.Region.Page, &item.Region.X, &item.Region.Y, &item.Region.Width, &item.Region.Height); err != nil {
 			return nil, err
 		}
+		decodeStringSlice(scoringRulesJSON, &item.ScoringRules)
 		decodeStringSlice(knowledgeJSON, &item.Knowledge)
 		questions = append(questions, item)
 	}
 	return questions, rows.Err()
 }
 
+func (s *Store) TemplateQuestion(ctx context.Context, templateID string, questionID string) (QuestionTemplate, error) {
+	var item QuestionTemplate
+	var knowledgeJSON string
+	var scoringRulesJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, question_no, question_type, score, COALESCE(standard_answer, ''), COALESCE(scoring_rules_json, JSON_ARRAY()), knowledge_json, page_no, x, y, width, height
+		FROM question_templates
+		WHERE template_id = ? AND id = ?
+	LIMIT 1`, templateID, questionID).Scan(
+		&item.ID, &item.No, &item.Type, &item.Score, &item.StandardAnswer, &scoringRulesJSON, &knowledgeJSON,
+		&item.Region.Page, &item.Region.X, &item.Region.Y, &item.Region.Width, &item.Region.Height,
+	)
+	if err != nil {
+		return QuestionTemplate{}, err
+	}
+	decodeStringSlice(scoringRulesJSON, &item.ScoringRules)
+	decodeStringSlice(knowledgeJSON, &item.Knowledge)
+	return item, nil
+}
+
+func (s *Store) CreateTemplateQuestion(ctx context.Context, templateID string, question QuestionTemplate) (QuestionTemplate, PaperTemplate, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	defer tx.Rollback()
+
+	if err := templateExistsTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if err := ensureTemplateDraftTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	question.ID = templateRecordID("q", question.ID)
+	if question.No == "" {
+		question.No = nextTemplateQuestionNo(ctx, tx, templateID)
+	}
+	if question.Region.Page == 0 {
+		question.Region.Page = 1
+	}
+	if err := insertTemplateQuestionTx(ctx, tx, templateID, question); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if err := refreshTemplateStatsTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	savedQuestion, err := s.TemplateQuestion(ctx, templateID, question.ID)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	template, err := s.Template(ctx, templateID)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	return savedQuestion, template, nil
+}
+
+func (s *Store) UpdateTemplateQuestion(ctx context.Context, templateID string, questionID string, question QuestionTemplate) (QuestionTemplate, PaperTemplate, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	defer tx.Rollback()
+
+	if err := templateExistsTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if err := ensureTemplateDraftTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	current, err := s.TemplateQuestion(ctx, templateID, questionID)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	question.ID = questionID
+	if question.No == "" {
+		question.No = current.No
+	}
+	if question.Type == "" {
+		question.Type = current.Type
+	}
+	if question.Score == 0 {
+		question.Score = current.Score
+	}
+	if question.StandardAnswer == "" {
+		question.StandardAnswer = current.StandardAnswer
+	}
+	if len(question.ScoringRules) == 0 {
+		question.ScoringRules = current.ScoringRules
+	}
+	if len(question.Knowledge) == 0 {
+		question.Knowledge = current.Knowledge
+	}
+	if question.Region.Page == 0 {
+		question.Region = current.Region
+	}
+	knowledgeJSON, err := json.Marshal(question.Knowledge)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE question_templates
+		SET question_no = ?, question_type = ?, score = ?, standard_answer = ?, scoring_rules_json = ?, knowledge_json = ?, page_no = ?, x = ?, y = ?, width = ?, height = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE template_id = ? AND id = ?`,
+		question.No, question.Type, question.Score, question.StandardAnswer, scoringRulesJSON(question.ScoringRules), string(knowledgeJSON),
+		question.Region.Page, question.Region.X, question.Region.Y, question.Region.Width, question.Region.Height,
+		templateID, questionID,
+	)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if affected == 0 {
+		return QuestionTemplate{}, PaperTemplate{}, sql.ErrNoRows
+	}
+	if err := refreshTemplateStatsTx(ctx, tx, templateID); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	savedQuestion, err := s.TemplateQuestion(ctx, templateID, questionID)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	template, err := s.Template(ctx, templateID)
+	if err != nil {
+		return QuestionTemplate{}, PaperTemplate{}, err
+	}
+	return savedQuestion, template, nil
+}
+
+func (s *Store) DeleteTemplateQuestion(ctx context.Context, templateID string, questionID string) (PaperTemplate, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	defer tx.Rollback()
+
+	if err := templateExistsTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	if err := ensureTemplateDraftTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM question_templates WHERE template_id = ? AND id = ?", templateID, questionID)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	if affected == 0 {
+		return PaperTemplate{}, sql.ErrNoRows
+	}
+	if err := refreshTemplateStatsTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PaperTemplate{}, err
+	}
+	return s.Template(ctx, templateID)
+}
+
+func (s *Store) SaveTemplateQuestions(ctx context.Context, templateID string, questions []QuestionTemplate) (PaperTemplate, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PaperTemplate{}, err
+	}
+	defer tx.Rollback()
+
+	if err := templateExistsTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	if err := ensureTemplateDraftTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM question_templates WHERE template_id = ?", templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	for index, question := range questions {
+		question.ID = templateRecordID("q", question.ID)
+		if question.No == "" {
+			question.No = fmt.Sprintf("%d", index+1)
+		}
+		if question.Region.Page == 0 {
+			question.Region.Page = 1
+		}
+		if err := insertTemplateQuestionTx(ctx, tx, templateID, question); err != nil {
+			return PaperTemplate{}, err
+		}
+	}
+	if err := refreshTemplateStatsTx(ctx, tx, templateID); err != nil {
+		return PaperTemplate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PaperTemplate{}, err
+	}
+	return s.Template(ctx, templateID)
+}
+
 func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, error) {
-	var analytics ClassroomAnalytics
-	analytics.ClassName = "六年级 3 班"
-	if err := s.db.QueryRowContext(ctx, "SELECT AVG(score), MAX(score), MIN(score) FROM exam_scores WHERE class_name = ?", analytics.ClassName).Scan(&analytics.AverageScore, &analytics.HighestScore, &analytics.LowestScore); err != nil {
+	analytics := ClassroomAnalytics{
+		ClassName:      "六年级 3 班",
+		QuestionStats:  []QuestionStat{},
+		KnowledgeStats: []KnowledgeStat{},
+		StudentRisks:   []StudentRisk{},
+	}
+	var averageScore, highestScore, lowestScore sql.NullFloat64
+	if err := s.db.QueryRowContext(ctx, "SELECT AVG(score), MAX(score), MIN(score) FROM exam_scores WHERE class_name = ?", analytics.ClassName).Scan(&averageScore, &highestScore, &lowestScore); err != nil {
 		return ClassroomAnalytics{}, err
+	}
+	if averageScore.Valid {
+		analytics.AverageScore = averageScore.Float64
+	}
+	if highestScore.Valid {
+		analytics.HighestScore = highestScore.Float64
+	}
+	if lowestScore.Valid {
+		analytics.LowestScore = lowestScore.Float64
 	}
 
 	questionRows, err := s.db.QueryContext(ctx, "SELECT question_no, accuracy, question_type FROM question_stats ORDER BY accuracy ASC")
@@ -471,6 +1209,80 @@ func (s *Store) ClassroomAnalytics(ctx context.Context) (ClassroomAnalytics, err
 	return analytics, nil
 }
 
+func insertTemplateQuestionTx(ctx context.Context, tx *sql.Tx, templateID string, question QuestionTemplate) error {
+	knowledgeJSON, err := json.Marshal(question.Knowledge)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO question_templates
+			(id, template_id, question_no, question_type, score, standard_answer, scoring_rules_json, knowledge_json, page_no, x, y, width, height)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		question.ID, templateID, question.No, question.Type, question.Score, question.StandardAnswer, scoringRulesJSON(question.ScoringRules), string(knowledgeJSON),
+		question.Region.Page, question.Region.X, question.Region.Y, question.Region.Width, question.Region.Height,
+	)
+	return err
+}
+
+func scoringRulesJSON(rules []string) string {
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+func validTemplateStatus(status string) bool {
+	return status == "draft" || status == "published" || status == "disabled"
+}
+
+func templateExistsTx(ctx context.Context, tx *sql.Tx, templateID string) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM paper_templates WHERE id = ? LIMIT 1", templateID).Scan(&exists); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureTemplateDraftTx(ctx context.Context, tx *sql.Tx, templateID string) error {
+	var status string
+	if err := tx.QueryRowContext(ctx, "SELECT status FROM paper_templates WHERE id = ? LIMIT 1", templateID).Scan(&status); err != nil {
+		return err
+	}
+	if status != "draft" {
+		return errTemplateLocked
+	}
+	return nil
+}
+
+func nextTemplateQuestionNo(ctx context.Context, tx *sql.Tx, templateID string) string {
+	var count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM question_templates WHERE template_id = ?", templateID).Scan(&count); err != nil {
+		return "1"
+	}
+	return fmt.Sprintf("%d", count+1)
+}
+
+func refreshTemplateStatsTx(ctx context.Context, tx *sql.Tx, templateID string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE paper_templates
+		SET question_count = (
+				SELECT COUNT(*)
+				FROM question_templates
+				WHERE template_id = ?
+			),
+			total_score = (
+				SELECT COALESCE(ROUND(SUM(score)), 0)
+				FROM question_templates
+				WHERE template_id = ?
+			),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		templateID, templateID, templateID,
+	)
+	return err
+}
+
 func pendingPages(jobs []ScanJob) int {
 	total := 0
 	for _, job := range jobs {
@@ -485,6 +1297,24 @@ func decodeStringSlice(raw string, target *[]string) {
 	if err := json.Unmarshal([]byte(raw), target); err != nil {
 		log.Printf("failed to decode json slice: %v", err)
 	}
+}
+
+func decodeScanFiles(raw string, target *[]ScanFile) {
+	if raw == "" {
+		*target = []ScanFile{}
+		return
+	}
+	if err := json.Unmarshal([]byte(raw), target); err != nil {
+		log.Printf("failed to decode scan files: %v", err)
+		*target = []ScanFile{}
+	}
+}
+
+func templateRecordID(prefix string, current string) string {
+	if current != "" && len(current) <= 40 {
+		return current
+	}
+	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 }
 
 func (s *Store) ensureSeedConstraints(ctx context.Context) error {

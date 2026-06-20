@@ -1,6 +1,7 @@
 package app
 
 type DashboardResponse struct {
+	Source        string          `json:"source,omitempty"`
 	Metrics       []Metric        `json:"metrics"`
 	ScanQueue     []ScanJob       `json:"scanQueue"`
 	ReviewQueue   []ReviewItem    `json:"reviewQueue"`
@@ -16,12 +17,109 @@ type Metric struct {
 }
 
 type ScanJob struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	ClassName string `json:"className"`
-	Pages     int    `json:"pages"`
-	Status    string `json:"status"`
-	Progress  int    `json:"progress"`
+	ID              string     `json:"id"`
+	Title           string     `json:"title"`
+	ClassName       string     `json:"className"`
+	TemplateID      string     `json:"templateId,omitempty"`
+	TemplateVersion int        `json:"templateVersion,omitempty"`
+	Pages           int        `json:"pages"`
+	Notes           string     `json:"notes,omitempty"`
+	Status          string     `json:"status"`
+	Progress        int        `json:"progress"`
+	FailureReason   string     `json:"failureReason,omitempty"`
+	RetryCount      int        `json:"retryCount"`
+	QueueStatus     string     `json:"queueStatus,omitempty"`
+	QueueMessage    string     `json:"queueMessage,omitempty"`
+	Files           []ScanFile `json:"files,omitempty"`
+}
+
+type ScanFile struct {
+	Key           string `json:"key"`
+	FileName      string `json:"fileName"`
+	ContentType   string `json:"contentType"`
+	Size          int64  `json:"size"`
+	URL           string `json:"url"`
+	Page          int    `json:"page,omitempty"`
+	Status        string `json:"status,omitempty"`
+	FailureReason string `json:"failureReason,omitempty"`
+	StudentID     string `json:"studentId,omitempty"`
+	StudentName   string `json:"studentName,omitempty"`
+	MatchStatus   string `json:"matchStatus,omitempty"`
+	MatchMethod   string `json:"matchMethod,omitempty"`
+}
+
+type ScanUploadResponse struct {
+	Files []ScanFile `json:"files"`
+}
+
+type ScanTaskRequest struct {
+	Title           string     `json:"title"`
+	ClassName       string     `json:"className"`
+	TemplateID      string     `json:"templateId"`
+	TemplateVersion int        `json:"templateVersion"`
+	Pages           int        `json:"pages"`
+	Notes           string     `json:"notes"`
+	Files           []ScanFile `json:"files"`
+}
+
+type ScanTaskResponse struct {
+	Status     string  `json:"status"`
+	QueueID    string  `json:"queueId,omitempty"`
+	QueueError string  `json:"queueError,omitempty"`
+	Task       ScanJob `json:"task"`
+}
+
+type ScanTaskListResponse struct {
+	Tasks []ScanJob `json:"tasks"`
+}
+
+type ScanTaskStatusRequest struct {
+	Status        string `json:"status"`
+	Progress      int    `json:"progress"`
+	FailureReason string `json:"failureReason"`
+	RetryCount    int    `json:"retryCount"`
+}
+
+type ScanTaskRetryRequest struct {
+	FileKey string `json:"fileKey"`
+}
+
+type ScanFileMatchRequest struct {
+	FileKey     string `json:"fileKey"`
+	StudentID   string `json:"studentId"`
+	StudentName string `json:"studentName"`
+	MatchMethod string `json:"matchMethod"`
+}
+
+type ScanTaskPreviewResponse struct {
+	Task  ScanJob    `json:"task"`
+	Files []ScanFile `json:"files"`
+}
+
+type ScanQueuePayload struct {
+	TaskID          string   `json:"taskId"`
+	Title           string   `json:"title"`
+	ClassName       string   `json:"className"`
+	TemplateID      string   `json:"templateId"`
+	TemplateVersion int      `json:"templateVersion"`
+	Pages           int      `json:"pages"`
+	FileKeys        []string `json:"fileKeys"`
+	RetryCount      int      `json:"retryCount"`
+	CreatedAt       string   `json:"createdAt"`
+}
+
+type TemplateAISuggestionRequest struct {
+	SourceFileURL string `json:"sourceFileUrl"`
+	PaperName     string `json:"paperName"`
+}
+
+type TemplateAISuggestionResponse struct {
+	PaperName          string             `json:"paperName"`
+	QuestionCount      int                `json:"questionCount"`
+	TotalScore         int                `json:"totalScore"`
+	SuggestedQuestions []QuestionTemplate `json:"suggestedQuestions"`
+	ReviewRequired     bool               `json:"reviewRequired"`
+	Source             string             `json:"source"`
 }
 
 type ReviewItem struct {
@@ -93,6 +191,25 @@ type GradingDecisionResponse struct {
 	NextReview   *SubjectiveGradingResponse `json:"nextReview,omitempty"`
 }
 
+type TemplateMutationResponse struct {
+	Status   string        `json:"status"`
+	Template PaperTemplate `json:"template"`
+}
+
+type TemplateRegionMutationResponse struct {
+	Status   string           `json:"status"`
+	Question QuestionTemplate `json:"question"`
+	Template PaperTemplate    `json:"template"`
+}
+
+type TemplateRegionsRequest struct {
+	Questions []QuestionTemplate `json:"questions"`
+}
+
+type TemplateStatusRequest struct {
+	Status string `json:"status"`
+}
+
 type PaperTemplate struct {
 	ID            string             `json:"id"`
 	Name          string             `json:"name"`
@@ -100,16 +217,22 @@ type PaperTemplate struct {
 	Grade         string             `json:"grade"`
 	QuestionCount int                `json:"questionCount"`
 	TotalScore    int                `json:"totalScore"`
+	SourceFileURL string             `json:"sourceFileUrl"`
+	Status        string             `json:"status"`
+	Version       int                `json:"version"`
+	ParentID      string             `json:"parentId"`
 	Questions     []QuestionTemplate `json:"questions"`
 }
 
 type QuestionTemplate struct {
-	ID        string   `json:"id"`
-	No        string   `json:"no"`
-	Type      string   `json:"type"`
-	Score     float64  `json:"score"`
-	Knowledge []string `json:"knowledge"`
-	Region    Region   `json:"region"`
+	ID             string   `json:"id"`
+	No             string   `json:"no"`
+	Type           string   `json:"type"`
+	Score          float64  `json:"score"`
+	StandardAnswer string   `json:"standardAnswer"`
+	ScoringRules   []string `json:"scoringRules"`
+	Knowledge      []string `json:"knowledge"`
+	Region         Region   `json:"region"`
 }
 
 type Region struct {
