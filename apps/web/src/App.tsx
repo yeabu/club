@@ -10,12 +10,18 @@ import {
   LayoutDashboard,
   Loader2,
   MessageSquareText,
+  Move,
   PenLine,
   RefreshCw,
+  RotateCcw,
   ScanLine,
   Send,
   SlidersHorizontal,
   Sparkles,
+  StepForward,
+  TimerReset,
+  ZoomIn,
+  ZoomOut,
   ShieldCheck,
   UsersRound
 } from "lucide-react";
@@ -92,10 +98,17 @@ type ScanTaskPreviewResponse = {
 type ReviewItem = {
   id: string;
   studentName: string;
+  className?: string;
   paperName: string;
   questionNo: string;
   aiAdvice: string;
   confidence: number;
+  status?: string;
+  reviewStage?: string;
+};
+
+type ReviewQueueResponse = {
+  items: ReviewItem[];
 };
 
 type KnowledgeStat = {
@@ -143,7 +156,25 @@ type SubjectiveData = {
     reason: string;
     comments: string[];
     confidence: number;
+    modelVersion?: string;
   };
+};
+
+type GradingHistoryItem = {
+  id: number;
+  submissionId: string;
+  questionId: string;
+  action: string;
+  score: number;
+  note: string;
+  actorName: string;
+  reviewStage: string;
+  modelVersion: string;
+  createdAt: string;
+};
+
+type GradingHistoryResponse = {
+  items: GradingHistoryItem[];
 };
 
 type GradingDecisionResponse = {
@@ -417,9 +448,9 @@ const fallbackDashboard: DashboardData = {
     ] }
   ],
   reviewQueue: [
-    { id: "review_001", studentName: "张三", paperName: "六年级数学期中卷", questionNo: "15", aiAdvice: "8 / 10", confidence: 86 },
-    { id: "review_002", studentName: "李四", paperName: "六年级数学期中卷", questionNo: "18", aiAdvice: "6 / 8", confidence: 78 },
-    { id: "review_003", studentName: "王五", paperName: "分数应用题专项", questionNo: "7", aiAdvice: "4 / 6", confidence: 74 }
+    { id: "review_001", studentName: "张三", className: "六年级 3 班", paperName: "六年级数学期中卷", questionNo: "15", aiAdvice: "8 / 10", confidence: 86, status: "pending", reviewStage: "first_review" },
+    { id: "review_002", studentName: "李四", className: "六年级 3 班", paperName: "六年级数学期中卷", questionNo: "18", aiAdvice: "6 / 8", confidence: 78, status: "second_review", reviewStage: "second_review" },
+    { id: "review_003", studentName: "王五", className: "六年级 1 班", paperName: "分数应用题专项", questionNo: "7", aiAdvice: "4 / 6", confidence: 74, status: "pending", reviewStage: "first_review" }
   ],
   weakPoints: [
     { name: "分数应用题", accuracy: 42, wrongCount: 29 },
@@ -627,6 +658,68 @@ function includesSearch(value: string, search: string) {
 
 function pageItems<T>(items: T[], page: number) {
   return items.slice((page - 1) * pageSize, page * pageSize);
+}
+
+function uniqueOptions(values: string[]): Option[] {
+  return Array.from(new Set(values.filter(Boolean))).map((value) => ({ label: value, value }));
+}
+
+function clampScore(value: number, fullScore: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(fullScore, Math.max(0, Math.round(value * 2) / 2));
+}
+
+function validateScore(value: number, fullScore: number) {
+  if (!Number.isFinite(value)) {
+    return "请输入有效分数";
+  }
+  if (value < 0 || value > fullScore) {
+    return `分数必须在 0 到 ${fullScore} 之间`;
+  }
+  if (Math.round(value * 2) !== value * 2) {
+    return "当前仅支持 0.5 分步进";
+  }
+  return "";
+}
+
+function reviewStageLabel(stage?: string) {
+  if (stage === "second_review") {
+    return "二审";
+  }
+  if (stage === "arbitration") {
+    return "仲裁";
+  }
+  if (stage === "spot_check") {
+    return "抽检";
+  }
+  return "一审";
+}
+
+function reviewStatusLabel(status?: string) {
+  if (status === "second_review") {
+    return "二审中";
+  }
+  if (status === "arbitration") {
+    return "仲裁中";
+  }
+  if (status === "reviewed") {
+    return "已裁定";
+  }
+  return "待复核";
+}
+
+function decisionLabel(action: string) {
+  const labels: Record<string, string> = {
+    accepted_ai: "接受 AI",
+    modified: "修改保存",
+    rejected: "驳回建议",
+    second_review: "提交二审",
+    arbitration: "提交仲裁",
+    spot_check: "抽检确认"
+  };
+  return labels[action] ?? action;
 }
 
 function formatFileSize(size: number) {
@@ -932,6 +1025,16 @@ function App() {
   const [reviewSort, setReviewSort] = useState("confidence_desc");
   const [reviewPage, setReviewPage] = useState(1);
   const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([]);
+  const [reviewClassFilter, setReviewClassFilter] = useState("all");
+  const [reviewPaperFilter, setReviewPaperFilter] = useState("all");
+  const [reviewQuestionFilter, setReviewQuestionFilter] = useState("all");
+  const [reviewStatusFilter, setReviewStatusFilter] = useState("all");
+  const [reviewStage, setReviewStage] = useState("first_review");
+  const [gradingHistory, setGradingHistory] = useState<GradingHistoryItem[]>([]);
+  const [paperZoom, setPaperZoom] = useState(1);
+  const [paperRotation, setPaperRotation] = useState(0);
+  const [paperOffset, setPaperOffset] = useState({ x: 0, y: 0 });
+  const [paperDragStart, setPaperDragStart] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const [templateSearch, setTemplateSearch] = useState("");
   const [templateFilter, setTemplateFilter] = useState("all");
   const [templateSort, setTemplateSort] = useState("name_asc");
@@ -950,6 +1053,7 @@ function App() {
 
   useEffect(() => {
     loadDashboard();
+    loadReviewQueue(true);
     loadSubjective();
     loadTemplates();
     loadAnalytics();
@@ -1038,6 +1142,10 @@ function App() {
         }
         return reviewFilter === "high" ? item.confidence >= 80 : item.confidence < 80;
       })
+      .filter((item) => reviewClassFilter === "all" || (item.className ?? "") === reviewClassFilter)
+      .filter((item) => reviewPaperFilter === "all" || item.paperName === reviewPaperFilter)
+      .filter((item) => reviewQuestionFilter === "all" || item.questionNo === reviewQuestionFilter)
+      .filter((item) => reviewStatusFilter === "all" || (item.status ?? "pending") === reviewStatusFilter)
       .filter((item) => includesSearch(`${item.studentName} ${item.paperName} ${item.questionNo}`, reviewSearch));
     return [...rows].sort((a, b) => {
       if (reviewSort === "question_asc") {
@@ -1048,9 +1156,60 @@ function App() {
       }
       return b.confidence - a.confidence;
     });
-  }, [dashboard.reviewQueue, reviewSearch, reviewFilter, reviewSort]);
+  }, [dashboard.reviewQueue, reviewSearch, reviewFilter, reviewSort, reviewClassFilter, reviewPaperFilter, reviewQuestionFilter, reviewStatusFilter]);
 
   const pagedReviewQueue = pageItems(filteredReviewQueue, reviewPage);
+  const reviewClassOptions = useMemo(() => uniqueOptions(dashboard.reviewQueue.map((item) => item.className ?? "").filter(Boolean)), [dashboard.reviewQueue]);
+  const reviewPaperOptions = useMemo(() => uniqueOptions(dashboard.reviewQueue.map((item) => item.paperName)), [dashboard.reviewQueue]);
+  const reviewQuestionOptions = useMemo(() => uniqueOptions(dashboard.reviewQueue.map((item) => item.questionNo)).sort((a, b) => Number(a.value) - Number(b.value)), [dashboard.reviewQueue]);
+  const selectedReviewIndex = filteredReviewQueue.findIndex((item) => item.id === selectedReviewId);
+  const scoreError = subjective
+    ? validateScore(score, subjective.fullScore)
+    : "";
+
+  useEffect(() => {
+    if (activeView !== "grading" || !subjective || !can("grading:decide")) {
+      return;
+    }
+    const currentSubjective = subjective;
+    function handleShortcut(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "a") {
+        event.preventDefault();
+        acceptAIScore();
+      }
+      if (key === "m") {
+        event.preventDefault();
+        void saveDecision("modified");
+      }
+      if (key === "r") {
+        event.preventDefault();
+        void saveDecision("rejected");
+      }
+      if (key === "f") {
+        event.preventDefault();
+        updateScore(currentSubjective.fullScore);
+      }
+      if (key === "z") {
+        event.preventDefault();
+        updateScore(0);
+      }
+      if (key === "n") {
+        event.preventDefault();
+        void openAdjacentReview(1);
+      }
+      if (key === "b") {
+        event.preventDefault();
+        void openAdjacentReview(-1);
+      }
+    }
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [activeView, subjective, score, note, reviewStage, filteredReviewQueue, selectedReviewIndex, scoreError, currentRole]);
 
   const filteredTemplates = useMemo(() => {
     const rows = templates
@@ -1217,6 +1376,7 @@ function App() {
     setReviewSearch("");
     setReviewPage(1);
     openView("grading");
+    void loadReviewQueue(true);
     setNotice("已进入阅卷中心，可从复核队列连续批阅");
   }
 
@@ -1825,6 +1985,37 @@ function App() {
     }
   }
 
+  async function loadReviewQueue(silent = false) {
+    if (!silent) {
+      setSubjectiveState((current) => nextLoadingState(current, "正在加载复核队列", "正在刷新复核队列"));
+    }
+    try {
+      const response = await fetch("/api/grading/subjective/reviews");
+      if (!response.ok) {
+        throw new Error("review queue api failed");
+      }
+      const result = await response.json() as ReviewQueueResponse;
+      const items = Array.isArray(result.items) ? result.items : [];
+      setDashboard((current) => ({ ...current, reviewQueue: items }));
+      if (!silent) {
+        setSubjectiveState(items.length > 0
+          ? { status: "success", message: "复核队列已更新" }
+          : { status: "empty", message: "暂无待复核主观题", detail: "扫描阅卷完成后会进入这里。" });
+      }
+      return items;
+    } catch {
+      setDashboard((current) => ({ ...current, reviewQueue: fallbackDashboard.reviewQueue }));
+      if (!silent) {
+        setSubjectiveState({
+          status: "error",
+          message: "复核队列 API 请求失败",
+          detail: "已展示本地演示队列，可稍后重试。"
+        });
+      }
+      return fallbackDashboard.reviewQueue;
+    }
+  }
+
   async function loadScanTasks(silent = false) {
     if (!silent) {
       setDashboardState((current) => nextLoadingState(current, "正在加载扫描任务", "正在刷新扫描任务"));
@@ -2267,10 +2458,49 @@ function App() {
   function applySubjective(data: SubjectiveData) {
     setSubjective(data);
     setSelectedReviewId(data.reviewId);
-    setScore(data.ai.score);
+    setScore(clampScore(data.ai.score, data.fullScore));
     setNote(data.ai.reason);
+    setReviewStage("first_review");
     setQueueStatus("已连接数据库队列");
     setSavedState("未保存");
+    setPaperZoom(1);
+    setPaperRotation(0);
+    setPaperOffset({ x: 0, y: 0 });
+    void loadGradingHistory(data);
+  }
+
+  async function loadGradingHistory(data = subjective) {
+    if (!data) {
+      setGradingHistory([]);
+      return [];
+    }
+    try {
+      const response = await fetch(`/api/grading/subjective/history?submissionId=${encodeURIComponent(data.submissionId)}&questionId=${encodeURIComponent(data.questionId)}`);
+      if (!response.ok) {
+        throw new Error("grading history api failed");
+      }
+      const result = await response.json() as GradingHistoryResponse;
+      const items = Array.isArray(result.items) ? result.items : [];
+      setGradingHistory(items);
+      return items;
+    } catch {
+      const fallbackItems: GradingHistoryItem[] = [
+        {
+          id: 0,
+          submissionId: data.submissionId,
+          questionId: data.questionId,
+          action: "ai_suggested",
+          score: data.ai.score,
+          note: data.ai.reason,
+          actorName: "AI Worker",
+          reviewStage: "ai",
+          modelVersion: data.ai.modelVersion ?? "mock-ai-worker-v1",
+          createdAt: new Date().toISOString()
+        }
+      ];
+      setGradingHistory(fallbackItems);
+      return fallbackItems;
+    }
   }
 
   async function loadSubjective(reviewId?: string) {
@@ -2320,9 +2550,61 @@ function App() {
     await loadSubjective(item.id);
   }
 
-  async function saveDecision(decision: "accepted_ai" | "modified" | "rejected") {
+  function updateScore(nextScore: number) {
+    if (!subjective) {
+      return;
+    }
+    setScore(clampScore(nextScore, subjective.fullScore));
+  }
+
+  function acceptAIScore() {
+    if (!subjective) {
+      return;
+    }
+    setScore(clampScore(subjective.ai.score, subjective.fullScore));
+    setNote(subjective.ai.reason);
+    setSavedState("已套用 AI 建议，尚未保存");
+  }
+
+  async function openAdjacentReview(direction: 1 | -1) {
+    if (filteredReviewQueue.length === 0) {
+      setNotice("当前筛选条件下没有复核项");
+      return;
+    }
+    const index = selectedReviewIndex >= 0 ? selectedReviewIndex : 0;
+    const next = filteredReviewQueue[index + direction];
+    if (!next) {
+      setNotice(direction > 0 ? "已经是当前队列最后一题" : "已经是当前队列第一题");
+      return;
+    }
+    await openReview(next);
+  }
+
+  function startPaperDrag(event: { clientX: number; clientY: number }) {
+    setPaperDragStart({ x: event.clientX, y: event.clientY, ox: paperOffset.x, oy: paperOffset.y });
+  }
+
+  function movePaper(event: { clientX: number; clientY: number }) {
+    if (!paperDragStart) {
+      return;
+    }
+    setPaperOffset({
+      x: paperDragStart.ox + event.clientX - paperDragStart.x,
+      y: paperDragStart.oy + event.clientY - paperDragStart.y
+    });
+  }
+
+  function stopPaperDrag() {
+    setPaperDragStart(null);
+  }
+
+  async function saveDecision(decision: "accepted_ai" | "modified" | "rejected" | "second_review" | "arbitration" | "spot_check") {
     if (!subjective) {
       setSavedState("没有可保存的复核项");
+      return;
+    }
+    if (scoreError) {
+      setSavedState(scoreError);
       return;
     }
     setSavedState("保存中");
@@ -2336,7 +2618,10 @@ function App() {
           questionId: subjective.questionId,
           finalScore: score,
           decision,
-          teacherNote: note
+          teacherNote: note,
+          actorName: "陈老师",
+          reviewStage,
+          modelVersion: subjective.ai.modelVersion ?? "mock-ai-worker-v1"
         })
       });
       if (!response.ok) {
@@ -2344,6 +2629,7 @@ function App() {
       }
       const result = await response.json() as GradingDecisionResponse;
       const nextDashboard = await loadDashboard();
+      await loadReviewQueue(true);
       if (result.nextReview) {
         applySubjective(result.nextReview);
         setSubjectiveState({ status: "success", message: "裁定已保存，下一题已加载" });
@@ -2365,6 +2651,21 @@ function App() {
         detail: "当前队列没有待处理题目。"
       });
     } catch {
+      setGradingHistory((current) => [
+        {
+          id: Date.now(),
+          submissionId: subjective.submissionId,
+          questionId: subjective.questionId,
+          action: decision,
+          score,
+          note,
+          actorName: "陈老师",
+          reviewStage,
+          modelVersion: subjective.ai.modelVersion ?? "mock-ai-worker-v1",
+          createdAt: new Date().toISOString()
+        },
+        ...current
+      ]);
       setSavedState("本地已记录，API 未连接");
       setSubjectiveState({
         status: "error",
@@ -2674,9 +2975,9 @@ function App() {
           </section>
         ) : null}
 
-        {activeView === "workspace" && (can("scan:create") || can("grading:review")) ? (
+        {(activeView === "workspace" || activeView === "grading") && (can("scan:create") || can("grading:review")) ? (
         <section className="work-grid">
-          {can("scan:create") ? (
+          {can("scan:create") && activeView === "workspace" ? (
           <div className="panel">
             <div className="panel-head">
               <div>
@@ -2802,6 +3103,38 @@ function App() {
               sortValue={reviewSort}
               totalCount={filteredReviewQueue.length}
             />
+            <div className="review-filter-grid">
+              <label>
+                班级
+                <select onChange={(event: { target: { value: string } }) => { setReviewClassFilter(event.target.value); setReviewPage(1); }} value={reviewClassFilter}>
+                  <option value="all">全部班级</option>
+                  {reviewClassOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label>
+                试卷
+                <select onChange={(event: { target: { value: string } }) => { setReviewPaperFilter(event.target.value); setReviewPage(1); }} value={reviewPaperFilter}>
+                  <option value="all">全部试卷</option>
+                  {reviewPaperOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label>
+                题号
+                <select onChange={(event: { target: { value: string } }) => { setReviewQuestionFilter(event.target.value); setReviewPage(1); }} value={reviewQuestionFilter}>
+                  <option value="all">全部题号</option>
+                  {reviewQuestionOptions.map((option) => <option key={option.value} value={option.value}>第 {option.label} 题</option>)}
+                </select>
+              </label>
+              <label>
+                状态
+                <select onChange={(event: { target: { value: string } }) => { setReviewStatusFilter(event.target.value); setReviewPage(1); }} value={reviewStatusFilter}>
+                  <option value="all">全部状态</option>
+                  <option value="pending">待复核</option>
+                  <option value="second_review">二审中</option>
+                  <option value="arbitration">仲裁中</option>
+                </select>
+              </label>
+            </div>
             <div className="review-list table-list">
               {filteredReviewQueue.length > 0 ? (
                 pagedReviewQueue.map((item) => (
@@ -2816,7 +3149,7 @@ function App() {
                       <span>{item.studentName}</span>
                       <strong>第 {item.questionNo} 题</strong>
                       <em>{item.aiAdvice}</em>
-                      <small>置信度 {item.confidence}%</small>
+                      <small>{item.className ?? "未关联班级"} · {reviewStatusLabel(item.status)} · {reviewStageLabel(item.reviewStage)} · 置信度 {item.confidence}%</small>
                     </button>
                   </div>
                 ))
@@ -2844,9 +3177,16 @@ function App() {
                   <h2>{subjective.paperName} · 第 {subjective.questionNo} 题</h2>
                   <span>{subjective.className} · {subjective.studentName} · {queueStatus}</span>
                 </div>
-                <div className="segmented">
-                  <button className={activeMode === "review" ? "active" : ""} onClick={() => setActiveMode("review")}>左右分屏批阅</button>
-                  <button className={activeMode === "template" ? "active" : ""} onClick={() => setActiveMode("template")}>模板信息</button>
+                <div className="grading-head-actions">
+                  <div className="segmented">
+                    <button className={activeMode === "review" ? "active" : ""} onClick={() => setActiveMode("review")}>左右分屏批阅</button>
+                    <button className={activeMode === "template" ? "active" : ""} onClick={() => setActiveMode("template")}>模板信息</button>
+                  </div>
+                  <div className="review-nav-actions">
+                    <button className="ghost-button" disabled={selectedReviewIndex <= 0} onClick={() => void openAdjacentReview(-1)} type="button">上一题</button>
+                    <button className="ghost-button" onClick={() => void openAdjacentReview(1)} type="button"><StepForward size={16} />跳过</button>
+                    <button className="secondary-button" disabled={selectedReviewIndex < 0 || selectedReviewIndex >= filteredReviewQueue.length - 1} onClick={() => void openAdjacentReview(1)} type="button">下一题</button>
+                  </div>
                 </div>
               </div>
               <RequestStateView state={subjectiveState} onRetry={() => loadSubjective(selectedReviewId)} compact />
@@ -2861,7 +3201,10 @@ function App() {
                     <p className="answer-copy">{subjective.standardAnswer.content}</p>
                     <div className="rule-list">
                       {subjective.standardAnswer.scoringRules.map((rule) => (
-                        <div className="rule-row" key={rule}>{rule}</div>
+                        <label className="rule-row" key={rule}>
+                          <input defaultChecked type="checkbox" />
+                          <span>{rule}</span>
+                        </label>
                       ))}
                     </div>
                     <div className="tag-row">
@@ -2876,11 +3219,30 @@ function App() {
                       <MessageSquareText size={18} />
                       <h3>学生答案与 AI 建议</h3>
                     </div>
-                    <div className="student-paper">
-                      <div className="paper-line wide" />
-                      <div className="paper-line medium" />
-                      <p>{subjective.studentAnswer.ocrText}</p>
-                      <div className="paper-line short" />
+                    <div className="paper-tools" aria-label="试卷图像工具">
+                      <button className="tool-button" onClick={() => setPaperZoom((value) => Math.max(0.6, Number((value - 0.1).toFixed(1))))} type="button"><ZoomOut size={15} />缩小</button>
+                      <span>{Math.round(paperZoom * 100)}%</span>
+                      <button className="tool-button" onClick={() => setPaperZoom((value) => Math.min(1.8, Number((value + 0.1).toFixed(1))))} type="button"><ZoomIn size={15} />放大</button>
+                      <button className="tool-button" onClick={() => setPaperRotation((value) => (value + 90) % 360)} type="button"><RotateCcw size={15} />旋转</button>
+                      <button className="tool-button" onClick={() => { setPaperZoom(1); setPaperRotation(0); setPaperOffset({ x: 0, y: 0 }); }} type="button"><TimerReset size={15} />复位</button>
+                    </div>
+                    <div
+                      className={paperDragStart ? "student-paper dragging" : "student-paper"}
+                      onMouseDown={startPaperDrag}
+                      onMouseLeave={stopPaperDrag}
+                      onMouseMove={movePaper}
+                      onMouseUp={stopPaperDrag}
+                    >
+                      <div
+                        className="student-paper-page"
+                        style={{ transform: `translate(${paperOffset.x}px, ${paperOffset.y}px) scale(${paperZoom}) rotate(${paperRotation}deg)` }}
+                      >
+                        <div className="paper-line wide" />
+                        <div className="paper-line medium" />
+                        <p>{subjective.studentAnswer.ocrText}</p>
+                        <div className="answer-highlight">第 {subjective.questionNo} 题作答区</div>
+                        <div className="paper-line short" />
+                      </div>
                     </div>
                     <div className="ai-box">
                       <div>
@@ -2910,19 +3272,46 @@ function App() {
                         value={score}
                       />
                     </label>
+                    <div className="score-stepper">
+                      <button className="tool-button" onClick={() => updateScore(score - 0.5)} type="button">-0.5</button>
+                      <button className="tool-button" onClick={() => updateScore(0)} type="button">零分</button>
+                      <button className="tool-button" onClick={acceptAIScore} type="button">AI 分</button>
+                      <button className="tool-button" onClick={() => updateScore(subjective.fullScore)} type="button">满分</button>
+                      <button className="tool-button" onClick={() => updateScore(score + 0.5)} type="button">+0.5</button>
+                    </div>
+                    {scoreError ? <span className="form-error">{scoreError}</span> : null}
+                    <label>
+                      复核阶段
+                      <select onChange={(event: { target: { value: string } }) => setReviewStage(event.target.value)} value={reviewStage}>
+                        <option value="first_review">一审</option>
+                        <option value="second_review">二审</option>
+                        <option value="spot_check">抽检</option>
+                        <option value="arbitration">仲裁</option>
+                      </select>
+                    </label>
                     <label>
                       批注
                       <textarea onChange={(event: { target: { value: string } }) => setNote(event.target.value)} value={note} />
                     </label>
                     {can("grading:decide") ? (
                       <div className="decision-actions">
-                        <button className="primary-button" onClick={() => saveDecision("accepted_ai")}><Check size={18} />接受 AI</button>
-                        <button className="secondary-button" onClick={() => saveDecision("modified")}><PenLine size={18} />修改保存</button>
-                        <button className="ghost-button" onClick={() => saveDecision("rejected")}>驳回建议</button>
+                        <button className="primary-button" disabled={Boolean(scoreError)} onClick={() => saveDecision("accepted_ai")}><Check size={18} />接受 AI</button>
+                        <button className="secondary-button" disabled={Boolean(scoreError)} onClick={() => saveDecision("modified")}><PenLine size={18} />修改保存</button>
+                        <button className="ghost-button" disabled={Boolean(scoreError)} onClick={() => saveDecision("rejected")}>驳回建议</button>
+                        <button className="ghost-button" disabled={Boolean(scoreError)} onClick={() => saveDecision("second_review")}>提交二审</button>
+                        <button className="ghost-button" disabled={Boolean(scoreError)} onClick={() => saveDecision("arbitration")}>提交仲裁</button>
                       </div>
                     ) : (
                       <div className="permission-note">当前角色仅可查看复核内容，不能保存教师裁定。</div>
                     )}
+                    <div className="shortcut-grid">
+                      <span>A 接受 AI</span>
+                      <span>M 保存</span>
+                      <span>R 驳回</span>
+                      <span>F 满分</span>
+                      <span>Z 零分</span>
+                      <span>N 下一题</span>
+                    </div>
                     <span className="save-state">{savedState}</span>
                   </aside>
                 </div>
@@ -2966,6 +3355,33 @@ function App() {
                   </div>
                 </div>
               )}
+              {activeMode === "review" ? (
+                <section className="grading-history">
+                  <div className="panel-head">
+                    <div>
+                      <p className="eyebrow">Audit Trail</p>
+                      <h3>批阅历史</h3>
+                    </div>
+                    <button className="ghost-button" onClick={() => void loadGradingHistory()} type="button"><RefreshCw size={16} />刷新</button>
+                  </div>
+                  {gradingHistory.length > 0 ? (
+                    <div className="history-list">
+                      {gradingHistory.map((item) => (
+                        <div className="history-row" key={`${item.id}-${item.createdAt}`}>
+                          <div>
+                            <strong>{decisionLabel(item.action)} · {item.score} 分</strong>
+                            <span>{item.actorName || "系统"} · {reviewStageLabel(item.reviewStage)} · {item.modelVersion || "未记录模型"}</span>
+                          </div>
+                          <p>{item.note || "未填写批注"}</p>
+                          <time>{new Date(item.createdAt).toLocaleString("zh-CN", { hour12: false })}</time>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <RequestStateView compact state={{ status: "empty", message: "暂无批阅历史", detail: "保存裁定后会记录教师、时间、分数、阶段和模型版本。" }} />
+                  )}
+                </section>
+              ) : null}
             </>
           ) : (
             <div className="empty-review">

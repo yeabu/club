@@ -933,6 +933,20 @@ button.metric:hover {
   color: #667085;
 }
 
+.grading-head-actions,
+.review-nav-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.review-nav-actions .ghost-button,
+.review-nav-actions .secondary-button {
+  min-height: 34px;
+}
+
 .segmented {
   background: #edf1f6;
   border-radius: 8px;
@@ -957,7 +971,7 @@ button.metric:hover {
 .split-review {
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr) minmax(248px, 280px);
+  grid-template-columns: minmax(250px, 1fr) minmax(280px, 1.15fr) minmax(268px, 300px);
 }
 
 .split-review.loading {
@@ -997,10 +1011,19 @@ button.metric:hover {
 }
 
 .rule-row {
+  align-items: center;
   background: #f1f5f9;
   border-radius: 8px;
   color: #334155;
+  display: flex;
+  gap: 10px;
   padding: 10px 12px;
+}
+
+.rule-row input {
+  accent-color: #0d7c66;
+  height: 16px;
+  width: 16px;
 }
 
 .tag-row {
@@ -1021,8 +1044,23 @@ button.metric:hover {
   background: #ffffff;
   border: 1px solid #e5eaf1;
   border-radius: 8px;
+  cursor: grab;
+  height: 220px;
   margin-bottom: 14px;
+  overflow: hidden;
   padding: 16px;
+  position: relative;
+  user-select: none;
+}
+
+.student-paper.dragging {
+  cursor: grabbing;
+}
+
+.student-paper-page {
+  min-height: 185px;
+  transform-origin: center;
+  transition: transform 120ms ease;
 }
 
 .student-paper p {
@@ -1050,6 +1088,31 @@ button.metric:hover {
 
 .paper-line.short {
   width: 48%;
+}
+
+.answer-highlight {
+  border: 2px solid rgba(13, 124, 102, 0.56);
+  border-radius: 8px;
+  color: #0d7c66;
+  font-size: 13px;
+  font-weight: 800;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+}
+
+.paper-tools {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.paper-tools span {
+  color: #405164;
+  font-size: 13px;
+  min-width: 42px;
+  text-align: center;
 }
 
 .ai-box {
@@ -1104,7 +1167,9 @@ button.metric:hover {
 }
 
 .score-panel input,
-.score-panel textarea {
+.score-panel textarea,
+.score-panel select,
+.review-filter-grid select {
   background: #ffffff;
   border: 1px solid #d8e1ec;
   border-radius: 8px;
@@ -1121,6 +1186,85 @@ button.metric:hover {
 .decision-actions {
   align-items: stretch;
   flex-direction: column;
+}
+
+.score-stepper,
+.shortcut-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.score-stepper .tool-button {
+  justify-content: center;
+}
+
+.shortcut-grid {
+  background: #ffffff;
+  border: 1px dashed #cdd8e5;
+  border-radius: 8px;
+  color: #667085;
+  font-size: 12px;
+  padding: 10px;
+}
+
+.review-filter-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 12px 0;
+}
+
+.review-filter-grid label {
+  color: #405164;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.grading-history {
+  border-top: 1px solid #e5eaf1;
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.history-row {
+  align-items: start;
+  background: #ffffff;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1.2fr) auto;
+  padding: 12px;
+}
+
+.history-row strong,
+.history-row span,
+.history-row p,
+.history-row time {
+  display: block;
+}
+
+.history-row strong {
+  color: #17202a;
+}
+
+.history-row span,
+.history-row time {
+  color: #667085;
+  font-size: 13px;
+}
+
+.history-row p {
+  color: #405164;
+  margin: 0;
 }
 
 .save-state {
@@ -1706,6 +1850,10 @@ button.metric:hover {
     grid-template-columns: minmax(180px, 1fr) minmax(132px, 0.7fr) minmax(142px, 0.8fr);
   }
 
+  .review-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .batch-actions {
     grid-column: 1 / -1;
     justify-content: space-between;
@@ -1722,7 +1870,16 @@ button.metric:hover {
   }
 
   .score-panel h3,
-  .score-panel .save-state {
+  .score-panel .save-state,
+  .score-panel .shortcut-grid {
+    grid-column: 1 / -1;
+  }
+
+  .history-row {
+    grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr);
+  }
+
+  .history-row time {
     grid-column: 1 / -1;
   }
 }
@@ -1786,6 +1943,21 @@ button.metric:hover {
 
   .score-panel {
     display: flex;
+  }
+
+  .review-filter-grid,
+  .history-row {
+    grid-template-columns: 1fr;
+  }
+
+  .grading-head-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .review-nav-actions {
+    justify-content: flex-start;
   }
 
   .table-toolbar {

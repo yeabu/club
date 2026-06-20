@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "AI Worker regression samples for template split, scan OCR/OMR, subjective grading and abnormal scan handling.",
+  "samples": [
+    {
+      "id": "blank-paper-001",
+      "type": "blank_paper",
+      "path": "samples/blank-paper.sample.json",
+      "expected": ["templateSuggestion", "question regions", "question types"]
+    },
+    {
+      "id": "answer-sheet-001",
+      "type": "answer_sheet",
+      "path": "samples/answer-sheet.sample.json",
+      "expected": ["omrResults", "objective answers", "confidence"]
+    },
+    {
+      "id": "student-paper-001",
+      "type": "student_paper",
+      "path": "samples/student-paper.sample.json",
+      "expected": ["ocrResults", "subjectiveResults", "wrongReasons"]
+    },
+    {
+      "id": "abnormal-scan-001",
+      "type": "abnormal_scan",
+      "path": "samples/abnormal-scan.sample.json",
+      "expected": ["preprocessResults", "deskew", "failure diagnostics"]
+    }
+  ]
+}

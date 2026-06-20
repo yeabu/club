@@ -33,14 +33,18 @@ func NewRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", app.handleHealth)
 	mux.HandleFunc("GET /api/dashboard", app.handleDashboard)
+	mux.HandleFunc("GET /api/grading/subjective/reviews", app.handleSubjectiveReviewQueue)
 	mux.HandleFunc("GET /api/grading/subjective/current", app.handleCurrentSubjective)
 	mux.HandleFunc("GET /api/grading/subjective/reviews/{reviewID}", app.handleReviewSubjective)
+	mux.HandleFunc("GET /api/grading/subjective/history", app.handleSubjectiveHistory)
 	mux.HandleFunc("POST /api/grading/subjective/decision", app.handleSubjectiveDecision)
 	mux.HandleFunc("POST /api/scan/uploads", app.handleScanUpload)
 	mux.HandleFunc("GET /api/scan/tasks", app.handleScanTasks)
 	mux.HandleFunc("POST /api/scan/tasks", app.handleCreateScanTask)
 	mux.HandleFunc("GET /api/scan/tasks/{taskID}", app.handleScanTask)
 	mux.HandleFunc("PATCH /api/scan/tasks/{taskID}/status", app.handleUpdateScanTaskStatus)
+	mux.HandleFunc("GET /api/scan/tasks/{taskID}/worker-result", app.handleScanWorkerResult)
+	mux.HandleFunc("POST /api/scan/tasks/{taskID}/worker-result", app.handleSaveScanWorkerResult)
 	mux.HandleFunc("POST /api/scan/tasks/{taskID}/retry", app.handleRetryScanTask)
 	mux.HandleFunc("POST /api/scan/tasks/{taskID}/match", app.handleMatchScanFile)
 	mux.HandleFunc("GET /api/scan/tasks/{taskID}/preview", app.handleScanTaskPreview)
@@ -107,6 +111,11 @@ func (app *App) handleScanUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		files = append(files, file)
+	}
+	if app.store != nil {
+		if err := app.store.SaveObjectFiles(r.Context(), files, "scan_upload", "scan_upload", ""); err != nil {
+			log.Printf("scan upload object metadata save failed: %v", err)
+		}
 	}
 	writeJSON(w, http.StatusCreated, ScanUploadResponse{Files: files})
 }
@@ -260,6 +269,73 @@ func (app *App) handleUpdateScanTaskStatus(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, ScanTaskResponse{Status: "updated", Task: task})
 }
 
+func (app *App) handleSaveScanWorkerResult(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	taskID := r.PathValue("taskID")
+	if taskID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "taskID is required"})
+		return
+	}
+	var req ScanWorkerResultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	task, err := app.store.SaveScanWorkerResult(r.Context(), taskID, req)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan task not found"})
+			return
+		}
+		log.Printf("scan worker result save failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan worker result save failed"})
+		return
+	}
+	record, err := app.store.ScanWorkerResult(r.Context(), taskID)
+	if err != nil {
+		log.Printf("scan worker result query failed: %v", err)
+		writeJSON(w, http.StatusOK, ScanWorkerResultResponse{Status: "saved", Task: task})
+		return
+	}
+	writeJSON(w, http.StatusOK, ScanWorkerResultResponse{Status: "saved", Task: task, Result: &record})
+}
+
+func (app *App) handleScanWorkerResult(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	taskID := r.PathValue("taskID")
+	if taskID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "taskID is required"})
+		return
+	}
+	task, err := app.store.ScanTask(r.Context(), taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan task not found"})
+			return
+		}
+		log.Printf("scan task query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan task query failed"})
+		return
+	}
+	record, err := app.store.ScanWorkerResult(r.Context(), taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan worker result not found"})
+			return
+		}
+		log.Printf("scan worker result query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan worker result query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ScanWorkerResultResponse{Status: "ok", Task: task, Result: &record})
+}
+
 func (app *App) handleRetryScanTask(w http.ResponseWriter, r *http.Request) {
 	if app.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
@@ -385,6 +461,18 @@ func filterScanFiles(files []ScanFile, fileKey string) []ScanFile {
 	return filtered
 }
 
+func (app *App) handleSubjectiveReviewQueue(w http.ResponseWriter, r *http.Request) {
+	if app.store != nil {
+		items, err := app.store.ReviewQueue(r.Context())
+		if err == nil {
+			writeJSON(w, http.StatusOK, ReviewQueueResponse{Items: items})
+			return
+		}
+		log.Printf("subjective review queue db query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, ReviewQueueResponse{Items: dashboardFixture().ReviewQueue})
+}
+
 func (app *App) handleCurrentSubjective(w http.ResponseWriter, r *http.Request) {
 	if app.store != nil {
 		data, err := app.store.CurrentSubjective(r.Context())
@@ -399,6 +487,24 @@ func (app *App) handleCurrentSubjective(w http.ResponseWriter, r *http.Request) 
 		log.Printf("current subjective db query failed: %v", err)
 	}
 	writeJSON(w, http.StatusOK, subjectiveFixture())
+}
+
+func (app *App) handleSubjectiveHistory(w http.ResponseWriter, r *http.Request) {
+	submissionID := strings.TrimSpace(r.URL.Query().Get("submissionId"))
+	questionID := strings.TrimSpace(r.URL.Query().Get("questionId"))
+	if submissionID == "" || questionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "submissionId and questionId are required"})
+		return
+	}
+	if app.store != nil {
+		items, err := app.store.GradingHistory(r.Context(), submissionID, questionID)
+		if err == nil {
+			writeJSON(w, http.StatusOK, GradingHistoryResponse{Items: items})
+			return
+		}
+		log.Printf("subjective history db query failed: %v", err)
+	}
+	writeJSON(w, http.StatusOK, GradingHistoryResponse{Items: []GradingHistoryItem{}})
 }
 
 func (app *App) handleReviewSubjective(w http.ResponseWriter, r *http.Request) {
@@ -886,9 +992,72 @@ func decodeQuestionTemplateBody(w http.ResponseWriter, r *http.Request) (Questio
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
+	data = normalizeAPIError(status, data)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+type APIErrorResponse struct {
+	Error APIError `json:"error"`
+}
+
+type APIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Field   string `json:"field,omitempty"`
+}
+
+func normalizeAPIError(status int, data any) any {
+	if status < http.StatusBadRequest {
+		return data
+	}
+	message := ""
+	field := ""
+	switch value := data.(type) {
+	case map[string]string:
+		message = value["error"]
+		field = value["field"]
+	case map[string]any:
+		if raw, ok := value["error"].(string); ok {
+			message = raw
+		}
+		if raw, ok := value["field"].(string); ok {
+			field = raw
+		}
+	}
+	if message == "" {
+		return data
+	}
+	return APIErrorResponse{
+		Error: APIError{
+			Code:    apiErrorCode(status, message),
+			Message: message,
+			Field:   field,
+		},
+	}
+}
+
+func apiErrorCode(status int, message string) string {
+	normalized := strings.ToLower(message)
+	switch {
+	case status == http.StatusBadRequest && strings.Contains(normalized, "required"):
+		return "VALIDATION_REQUIRED"
+	case status == http.StatusBadRequest:
+		return "BAD_REQUEST"
+	case status == http.StatusForbidden:
+		return "FORBIDDEN"
+	case status == http.StatusNotFound:
+		return "NOT_FOUND"
+	case status == http.StatusConflict:
+		return "CONFLICT"
+	case status == http.StatusServiceUnavailable:
+		return "SERVICE_UNAVAILABLE"
+	case status >= http.StatusInternalServerError:
+		return "INTERNAL_ERROR"
+	default:
+		return "REQUEST_ERROR"
 	}
 }

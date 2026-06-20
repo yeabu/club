@@ -1,0 +1,14 @@
+{
+  "taskId": "sample_scan_abnormal_001",
+  "title": "异常扫描件样本",
+  "templateId": "tpl_001",
+  "templateVersion": 1,
+  "files": [
+    {
+      "key": "samples/abnormal-rotated-low-contrast.png",
+      "fileName": "abnormal-rotated-low-contrast.png",
+      "contentType": "image/png",
+      "mockText": "低对比度旋转样本，用于验证预处理日志和失败定位。"
+    }
+  ]
+}

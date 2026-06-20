@@ -80,6 +80,29 @@ type ScanTaskStatusRequest struct {
 	RetryCount    int    `json:"retryCount"`
 }
 
+type ScanWorkerResultRequest struct {
+	Status        string         `json:"status"`
+	Progress      int            `json:"progress"`
+	FailureReason string         `json:"failureReason"`
+	ModelVersion  string         `json:"modelVersion"`
+	Result        map[string]any `json:"result"`
+}
+
+type ScanWorkerResultResponse struct {
+	Status string                  `json:"status"`
+	Task   ScanJob                 `json:"task"`
+	Result *ScanWorkerResultRecord `json:"result,omitempty"`
+}
+
+type ScanWorkerResultRecord struct {
+	TaskID        string         `json:"taskId"`
+	Status        string         `json:"status"`
+	Progress      int            `json:"progress"`
+	FailureReason string         `json:"failureReason,omitempty"`
+	ModelVersion  string         `json:"modelVersion,omitempty"`
+	Result        map[string]any `json:"result"`
+}
+
 type ScanTaskRetryRequest struct {
 	FileKey string `json:"fileKey"`
 }
@@ -125,10 +148,17 @@ type TemplateAISuggestionResponse struct {
 type ReviewItem struct {
 	ID          string `json:"id"`
 	StudentName string `json:"studentName"`
+	ClassName   string `json:"className,omitempty"`
 	PaperName   string `json:"paperName"`
 	QuestionNo  string `json:"questionNo"`
 	AIAdvice    string `json:"aiAdvice"`
 	Confidence  int    `json:"confidence"`
+	Status      string `json:"status,omitempty"`
+	ReviewStage string `json:"reviewStage,omitempty"`
+}
+
+type ReviewQueueResponse struct {
+	Items []ReviewItem `json:"items"`
 }
 
 type KnowledgeStat struct {
@@ -182,6 +212,9 @@ type GradingDecisionRequest struct {
 	FinalScore   float64 `json:"finalScore"`
 	Decision     string  `json:"decision"`
 	TeacherNote  string  `json:"teacherNote"`
+	ActorName    string  `json:"actorName"`
+	ReviewStage  string  `json:"reviewStage"`
+	ModelVersion string  `json:"modelVersion"`
 }
 
 type GradingDecisionResponse struct {
@@ -189,6 +222,23 @@ type GradingDecisionResponse struct {
 	FinalScore   float64                    `json:"finalScore"`
 	NextQuestion string                     `json:"nextQuestion"`
 	NextReview   *SubjectiveGradingResponse `json:"nextReview,omitempty"`
+}
+
+type GradingHistoryResponse struct {
+	Items []GradingHistoryItem `json:"items"`
+}
+
+type GradingHistoryItem struct {
+	ID           int64   `json:"id"`
+	SubmissionID string  `json:"submissionId"`
+	QuestionID   string  `json:"questionId"`
+	Action       string  `json:"action"`
+	Score        float64 `json:"score"`
+	Note         string  `json:"note"`
+	ActorName    string  `json:"actorName"`
+	ReviewStage  string  `json:"reviewStage"`
+	ModelVersion string  `json:"modelVersion"`
+	CreatedAt    string  `json:"createdAt"`
 }
 
 type TemplateMutationResponse struct {

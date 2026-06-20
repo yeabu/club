@@ -1,0 +1,14 @@
+{
+  "taskId": "sample_scan_student_001",
+  "title": "六年级数学期中卷学生卷样本",
+  "templateId": "tpl_001",
+  "templateVersion": 1,
+  "files": [
+    {
+      "key": "samples/student-paper-zhangsan-page-1.png",
+      "fileName": "student-paper-zhangsan-page-1.png",
+      "contentType": "image/png",
+      "mockText": "设需要 x 千克，3/5 = x/40，5x = 120，x = 24。答需要 24 千克。"
+    }
+  ]
+}

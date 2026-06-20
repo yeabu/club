@@ -1,0 +1,11 @@
+{
+  "key": "samples/answer-sheet-001.png",
+  "fileName": "answer-sheet-001.png",
+  "contentType": "image/png",
+  "template": {
+    "templateId": "tpl_001",
+    "templateVersion": 1,
+    "objectiveQuestionCount": 5
+  },
+  "notes": "用于验证 OMR 选择题填涂识别。"
+}

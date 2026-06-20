@@ -121,14 +121,52 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "paper_templates", column: "parent_id", definition: "VARCHAR(40) DEFAULT ''"},
 		{table: "paper_templates", column: "source_file_url", definition: "VARCHAR(255) DEFAULT ''"},
 		{table: "question_templates", column: "scoring_rules_json", definition: "JSON NULL AFTER standard_answer"},
+		{table: "classes", column: "campus_id", definition: "VARCHAR(40) DEFAULT '' AFTER school_id"},
+		{table: "classes", column: "grade_id", definition: "VARCHAR(40) DEFAULT '' AFTER campus_id"},
+		{table: "students", column: "user_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
+		{table: "students", column: "student_no", definition: "VARCHAR(40) DEFAULT '' AFTER class_id"},
+		{table: "teachers", column: "user_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
+		{table: "teachers", column: "role", definition: "VARCHAR(40) DEFAULT 'subject_teacher' AFTER subject"},
+		{table: "assignments", column: "exam_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
+		{table: "assignments", column: "kind", definition: "VARCHAR(40) NOT NULL DEFAULT 'exam' AFTER title"},
+		{table: "assignments", column: "class_id", definition: "VARCHAR(40) DEFAULT '' AFTER kind"},
+		{table: "assignments", column: "template_version", definition: "INT NOT NULL DEFAULT 1 AFTER template_id"},
+		{table: "assignments", column: "teacher_id", definition: "VARCHAR(40) DEFAULT '' AFTER template_version"},
+		{table: "assignments", column: "published_at", definition: "DATETIME NULL AFTER teacher_id"},
+		{table: "assignments", column: "completed_at", definition: "DATETIME NULL AFTER due_at"},
+		{table: "scan_jobs", column: "assignment_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
 		{table: "scan_jobs", column: "template_id", definition: "VARCHAR(40) DEFAULT '' AFTER class_name"},
 		{table: "scan_jobs", column: "template_version", definition: "INT NOT NULL DEFAULT 1 AFTER template_id"},
+		{table: "scan_jobs", column: "created_by", definition: "VARCHAR(40) DEFAULT '' AFTER template_version"},
 		{table: "scan_jobs", column: "notes", definition: "TEXT AFTER pages"},
 		{table: "scan_jobs", column: "files_json", definition: "JSON NULL AFTER notes"},
 		{table: "scan_jobs", column: "failure_reason", definition: "TEXT AFTER progress"},
 		{table: "scan_jobs", column: "retry_count", definition: "INT NOT NULL DEFAULT 0 AFTER failure_reason"},
 		{table: "scan_jobs", column: "queue_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER retry_count"},
 		{table: "scan_jobs", column: "queue_message", definition: "VARCHAR(255) DEFAULT '' AFTER queue_status"},
+		{table: "submissions", column: "scan_task_id", definition: "VARCHAR(40) DEFAULT '' AFTER student_id"},
+		{table: "submissions", column: "student_name", definition: "VARCHAR(80) DEFAULT '' AFTER scan_task_id"},
+		{table: "submissions", column: "class_name", definition: "VARCHAR(100) DEFAULT '' AFTER student_name"},
+		{table: "submissions", column: "page_count", definition: "INT NOT NULL DEFAULT 0 AFTER file_url"},
+		{table: "submissions", column: "matched_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'matched' AFTER page_count"},
+		{table: "submissions", column: "graded_at", definition: "DATETIME NULL AFTER submitted_at"},
+		{table: "subjective_reviews", column: "review_stage", definition: "VARCHAR(40) NOT NULL DEFAULT 'first_review' AFTER status"},
+		{table: "subjective_reviews", column: "assignee_id", definition: "VARCHAR(40) DEFAULT '' AFTER review_stage"},
+		{table: "subjective_reviews", column: "priority", definition: "INT NOT NULL DEFAULT 0 AFTER assignee_id"},
+		{table: "grading_history", column: "actor_name", definition: "VARCHAR(80) DEFAULT '' AFTER actor_id"},
+		{table: "grading_history", column: "review_stage", definition: "VARCHAR(40) DEFAULT 'first_review' AFTER actor_name"},
+		{table: "grading_history", column: "model_version", definition: "VARCHAR(80) DEFAULT '' AFTER review_stage"},
+		{table: "wrong_questions", column: "submission_id", definition: "VARCHAR(40) DEFAULT '' AFTER question_id"},
+		{table: "wrong_questions", column: "question_no", definition: "VARCHAR(20) DEFAULT '' AFTER submission_id"},
+		{table: "wrong_questions", column: "score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER source_paper"},
+		{table: "wrong_questions", column: "max_score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER score"},
+		{table: "wrong_questions", column: "correct_answer", definition: "TEXT AFTER max_score"},
+		{table: "wrong_questions", column: "student_answer", definition: "TEXT AFTER correct_answer"},
+		{table: "wrong_questions", column: "explanation", definition: "TEXT AFTER student_answer"},
+		{table: "wrong_questions", column: "correction_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'pending' AFTER explanation"},
+		{table: "wrong_questions", column: "repractice_status", definition: "VARCHAR(30) NOT NULL DEFAULT 'not_assigned' AFTER correction_status"},
+		{table: "wrong_questions", column: "corrected_at", definition: "DATETIME NULL AFTER repractice_status"},
+		{table: "wrong_questions", column: "updated_at", definition: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"},
 	}
 	for _, item := range columns {
 		exists, err := s.columnExists(ctx, item.table, item.column)
@@ -291,6 +329,44 @@ func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJo
 	return job, nil
 }
 
+func (s *Store) SaveObjectFiles(ctx context.Context, files []ScanFile, purpose string, ownerType string, ownerID string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	for _, file := range files {
+		metadata, err := json.Marshal(map[string]any{
+			"fileName":      file.FileName,
+			"page":          file.Page,
+			"status":        file.Status,
+			"matchStatus":   file.MatchStatus,
+			"matchMethod":   file.MatchMethod,
+			"studentId":     file.StudentID,
+			"studentName":   file.StudentName,
+			"failureReason": file.FailureReason,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO object_files
+				(object_key, bucket, storage_driver, url, content_type, size_bytes, purpose, owner_type, owner_id, metadata_json)
+			VALUES (?, 'local-dev', 'local', ?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				url = VALUES(url),
+				content_type = VALUES(content_type),
+				size_bytes = VALUES(size_bytes),
+				purpose = VALUES(purpose),
+				owner_type = VALUES(owner_type),
+				owner_id = VALUES(owner_id),
+				metadata_json = VALUES(metadata_json)`,
+			file.Key, file.URL, file.ContentType, file.Size, purpose, ownerType, ownerID, string(metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) UpdateScanQueueStatus(ctx context.Context, taskID string, queueStatus string, queueMessage string) error {
 	status := "排队中"
 	failureReason := ""
@@ -336,6 +412,83 @@ func (s *Store) UpdateScanTaskStatus(ctx context.Context, taskID string, req Sca
 		return ScanJob{}, sql.ErrNoRows
 	}
 	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) SaveScanWorkerResult(ctx context.Context, taskID string, req ScanWorkerResultRequest) (ScanJob, error) {
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = "识别完成"
+	}
+	progress := req.Progress
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	if req.Result == nil {
+		req.Result = map[string]any{}
+	}
+	raw, err := json.Marshal(req.Result)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO worker_task_results (task_id, status, progress, failure_reason, model_version, result_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			status = VALUES(status),
+			progress = VALUES(progress),
+			failure_reason = VALUES(failure_reason),
+			model_version = VALUES(model_version),
+			result_json = VALUES(result_json),
+			updated_at = CURRENT_TIMESTAMP`,
+		taskID, status, progress, req.FailureReason, req.ModelVersion, string(raw),
+	); err != nil {
+		return ScanJob{}, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE scan_jobs
+		SET status = ?, progress = ?, failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		status, progress, req.FailureReason, taskID,
+	)
+	if err != nil {
+		return ScanJob{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ScanJob{}, err
+	}
+	if affected == 0 {
+		return ScanJob{}, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return ScanJob{}, err
+	}
+	return s.ScanTask(ctx, taskID)
+}
+
+func (s *Store) ScanWorkerResult(ctx context.Context, taskID string) (ScanWorkerResultRecord, error) {
+	var record ScanWorkerResultRecord
+	var raw string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT task_id, status, progress, COALESCE(failure_reason, ''), COALESCE(model_version, ''), result_json
+		FROM worker_task_results
+		WHERE task_id = ?
+		LIMIT 1`, taskID).Scan(&record.TaskID, &record.Status, &record.Progress, &record.FailureReason, &record.ModelVersion, &raw)
+	if err != nil {
+		return ScanWorkerResultRecord{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &record.Result); err != nil {
+		return ScanWorkerResultRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *Store) RetryScanTask(ctx context.Context, taskID string, fileKey string) (ScanJob, error) {
@@ -494,11 +647,11 @@ func markScanFilesPending(files []ScanFile) []ScanFile {
 
 func (s *Store) ReviewQueue(ctx context.Context) ([]ReviewItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, student_name, paper_name, question_no, ai_score, full_score, confidence
+		SELECT id, student_name, class_name, paper_name, question_no, ai_score, full_score, confidence, status, review_stage
 		FROM subjective_reviews
-		WHERE status = 'pending'
-		ORDER BY updated_at DESC
-		LIMIT 8`)
+		WHERE status IN ('pending', 'second_review', 'arbitration')
+		ORDER BY priority DESC, updated_at DESC
+		LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -508,13 +661,38 @@ func (s *Store) ReviewQueue(ctx context.Context) ([]ReviewItem, error) {
 	for rows.Next() {
 		var item ReviewItem
 		var aiScore, fullScore float64
-		if err := rows.Scan(&item.ID, &item.StudentName, &item.PaperName, &item.QuestionNo, &aiScore, &fullScore, &item.Confidence); err != nil {
+		if err := rows.Scan(&item.ID, &item.StudentName, &item.ClassName, &item.PaperName, &item.QuestionNo, &aiScore, &fullScore, &item.Confidence, &item.Status, &item.ReviewStage); err != nil {
 			return nil, err
 		}
 		item.AIAdvice = fmt.Sprintf("%.0f / %.0f", aiScore, fullScore)
 		reviews = append(reviews, item)
 	}
 	return reviews, rows.Err()
+}
+
+func (s *Store) GradingHistory(ctx context.Context, submissionID string, questionID string) ([]GradingHistoryItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, submission_id, question_id, action, score, COALESCE(note, ''), COALESCE(actor_name, ''), COALESCE(review_stage, ''), COALESCE(model_version, ''), created_at
+		FROM grading_history
+		WHERE submission_id = ? AND question_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 20`, submissionID, questionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := []GradingHistoryItem{}
+	for rows.Next() {
+		var item GradingHistoryItem
+		var createdAt time.Time
+		if err := rows.Scan(&item.ID, &item.SubmissionID, &item.QuestionID, &item.Action, &item.Score, &item.Note, &item.ActorName, &item.ReviewStage, &item.ModelVersion, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = createdAt.Format(time.RFC3339)
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Store) WeakPoints(ctx context.Context) ([]KnowledgeStat, error) {
@@ -580,8 +758,8 @@ func (s *Store) CurrentSubjective(ctx context.Context) (SubjectiveGradingRespons
 			full_score, standard_answer, scoring_rules_json, knowledge_json, student_ocr_text,
 			student_image_url, ai_score, ai_reason, ai_comments_json, confidence
 		FROM subjective_reviews
-		WHERE status = 'pending'
-		ORDER BY updated_at DESC
+		WHERE status IN ('pending', 'second_review', 'arbitration')
+		ORDER BY priority DESC, updated_at DESC
 		LIMIT 1`)
 }
 
@@ -658,7 +836,40 @@ func (s *Store) subjectiveByQuery(ctx context.Context, query string, args ...any
 }
 
 func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionRequest) (GradingDecisionResponse, error) {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	defer tx.Rollback()
+
+	var review struct {
+		ID             string
+		PaperName      string
+		StudentName    string
+		ClassName      string
+		StudentID      string
+		QuestionNo     string
+		FullScore      float64
+		StandardAnswer string
+		KnowledgeJSON  string
+		OCRText        string
+		ImageURL       string
+	}
+	err = tx.QueryRowContext(ctx, `
+		SELECT sr.id, sr.paper_name, sr.student_name, sr.class_name, COALESCE(sub.student_id, ''),
+			sr.question_no, sr.full_score, sr.standard_answer, sr.knowledge_json, sr.student_ocr_text, sr.student_image_url
+		FROM subjective_reviews sr
+		LEFT JOIN submissions sub ON sub.id = sr.submission_id
+		WHERE sr.submission_id = ? AND sr.question_id = ?
+		LIMIT 1`, req.SubmissionID, req.QuestionID).Scan(
+		&review.ID, &review.PaperName, &review.StudentName, &review.ClassName, &review.StudentID,
+		&review.QuestionNo, &review.FullScore, &review.StandardAnswer, &review.KnowledgeJSON, &review.OCRText, &review.ImageURL,
+	)
+	if err != nil {
+		return GradingDecisionResponse{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO grading_decisions (submission_id, question_id, final_score, decision, teacher_note)
 		VALUES (?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE final_score = VALUES(final_score), decision = VALUES(decision), teacher_note = VALUES(teacher_note), updated_at = CURRENT_TIMESTAMP`,
@@ -667,7 +878,97 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 	if err != nil {
 		return GradingDecisionResponse{}, err
 	}
-	_, _ = s.db.ExecContext(ctx, "UPDATE subjective_reviews SET status = 'reviewed', updated_at = CURRENT_TIMESTAMP WHERE submission_id = ? AND question_id = ?", req.SubmissionID, req.QuestionID)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
+		VALUES (?, ?, ?, ?, ?, 'teacher', 'final')
+		ON DUPLICATE KEY UPDATE question_no = VALUES(question_no), score = VALUES(score), max_score = VALUES(max_score),
+			source = VALUES(source), status = VALUES(status), updated_at = CURRENT_TIMESTAMP`,
+		req.SubmissionID, req.QuestionID, review.QuestionNo, req.FinalScore, review.FullScore,
+	); err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	actorName := strings.TrimSpace(req.ActorName)
+	if actorName == "" {
+		actorName = "当前教师"
+	}
+	reviewStage := strings.TrimSpace(req.ReviewStage)
+	if reviewStage == "" {
+		reviewStage = "first_review"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO grading_history (submission_id, question_id, action, score, note, actor_id, actor_name, review_stage, model_version)
+		VALUES (?, ?, ?, ?, ?, '', ?, ?, ?)`,
+		req.SubmissionID, req.QuestionID, req.Decision, req.FinalScore, req.TeacherNote, actorName, reviewStage, req.ModelVersion,
+	); err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO student_answers (submission_id, question_id, question_no, answer_text, image_url)
+		VALUES (?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE question_no = VALUES(question_no), answer_text = VALUES(answer_text), image_url = VALUES(image_url), updated_at = CURRENT_TIMESTAMP`,
+		req.SubmissionID, req.QuestionID, review.QuestionNo, review.OCRText, review.ImageURL,
+	); err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	if req.FinalScore < review.FullScore {
+		knowledgePoint := firstKnowledgePoint(review.KnowledgeJSON)
+		result, err := tx.ExecContext(ctx, `
+			UPDATE wrong_questions
+			SET student_id = ?,
+				question_no = ?,
+				knowledge_point = ?,
+				wrong_reason = ?,
+				source_paper = ?,
+				score = ?,
+				max_score = ?,
+				correct_answer = ?,
+				student_answer = ?,
+				explanation = ?,
+				correction_status = 'pending',
+				repractice_status = 'not_assigned',
+				updated_at = CURRENT_TIMESTAMP
+			WHERE submission_id = ? AND question_id = ?`,
+			review.StudentID, review.QuestionNo, knowledgePoint, wrongReason(req, review.FullScore), review.PaperName,
+			req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, req.TeacherNote,
+			req.SubmissionID, req.QuestionID,
+		)
+		if err != nil {
+			return GradingDecisionResponse{}, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return GradingDecisionResponse{}, err
+		}
+		if affected == 0 {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO wrong_questions
+					(student_id, question_id, submission_id, question_no, knowledge_point, wrong_reason, source_paper, score, max_score, correct_answer, student_answer, explanation, correction_status, repractice_status)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'not_assigned')`,
+				review.StudentID, req.QuestionID, req.SubmissionID, review.QuestionNo, knowledgePoint, wrongReason(req, review.FullScore), review.PaperName,
+				req.FinalScore, review.FullScore, review.StandardAnswer, review.OCRText, req.TeacherNote,
+			); err != nil {
+				return GradingDecisionResponse{}, err
+			}
+		}
+	}
+	nextStatus := "reviewed"
+	if req.Decision == "second_review" {
+		nextStatus = "second_review"
+		reviewStage = "second_review"
+	}
+	if req.Decision == "arbitration" {
+		nextStatus = "arbitration"
+		reviewStage = "arbitration"
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE subjective_reviews SET status = ?, review_stage = ?, updated_at = CURRENT_TIMESTAMP WHERE submission_id = ? AND question_id = ?", nextStatus, reviewStage, req.SubmissionID, req.QuestionID); err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE submissions SET status = 'graded', graded_at = CURRENT_TIMESTAMP WHERE id = ?", req.SubmissionID); err != nil {
+		return GradingDecisionResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return GradingDecisionResponse{}, err
+	}
 
 	nextQuestion := ""
 	nextReview, err := s.CurrentSubjective(ctx)
@@ -686,6 +987,25 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 		response.NextReview = &nextReview
 	}
 	return response, nil
+}
+
+func firstKnowledgePoint(raw string) string {
+	var knowledge []string
+	decodeStringSlice(raw, &knowledge)
+	if len(knowledge) == 0 || strings.TrimSpace(knowledge[0]) == "" {
+		return "未归类"
+	}
+	return strings.TrimSpace(knowledge[0])
+}
+
+func wrongReason(req GradingDecisionRequest, fullScore float64) string {
+	if strings.TrimSpace(req.TeacherNote) != "" {
+		return strings.TrimSpace(req.TeacherNote)
+	}
+	if req.FinalScore <= 0 {
+		return "未得分，需订正"
+	}
+	return fmt.Sprintf("得分 %.1f/%.1f，需订正", req.FinalScore, fullScore)
 }
 
 func (s *Store) ResetDemo(ctx context.Context) (DashboardResponse, error) {
