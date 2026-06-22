@@ -15,7 +15,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	config Config
 }
 
 var errTemplateLocked = errors.New("template is not draft")
@@ -50,7 +51,7 @@ func OpenStore(ctx context.Context, config Config) (*Store, error) {
 		return nil, err
 	}
 
-	store := &Store{db: db}
+	store := &Store{db: db, config: config}
 	if autoMigrate {
 		if err := store.Migrate(ctx); err != nil {
 			_ = db.Close()
@@ -339,6 +340,15 @@ func (s *Store) SaveObjectFiles(ctx context.Context, files []ScanFile, purpose s
 		return nil
 	}
 	for _, file := range files {
+		driver := s.config.StorageDriver
+		bucket := "local-dev"
+		if driver == "obs" {
+			bucket = s.config.OBS.Bucket
+		} else if driver == "minio" {
+			bucket = s.config.MinIO.Bucket
+		} else {
+			driver = "local"
+		}
 		metadata, err := json.Marshal(map[string]any{
 			"fileName":      file.FileName,
 			"page":          file.Page,
@@ -355,7 +365,7 @@ func (s *Store) SaveObjectFiles(ctx context.Context, files []ScanFile, purpose s
 		if _, err := s.db.ExecContext(ctx, `
 			INSERT INTO object_files
 				(object_key, bucket, storage_driver, url, content_type, size_bytes, purpose, owner_type, owner_id, metadata_json)
-			VALUES (?, 'local-dev', 'local', ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
 				url = VALUES(url),
 				content_type = VALUES(content_type),
@@ -364,7 +374,7 @@ func (s *Store) SaveObjectFiles(ctx context.Context, files []ScanFile, purpose s
 				owner_type = VALUES(owner_type),
 				owner_id = VALUES(owner_id),
 				metadata_json = VALUES(metadata_json)`,
-			file.Key, file.URL, file.ContentType, file.Size, purpose, ownerType, ownerID, string(metadata),
+			file.Key, bucket, driver, file.URL, file.ContentType, file.Size, purpose, ownerType, ownerID, string(metadata),
 		); err != nil {
 			return err
 		}

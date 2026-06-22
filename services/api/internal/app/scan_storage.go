@@ -6,11 +6,14 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
 )
 
 const maxScanUploadBytes int64 = 25 * 1024 * 1024
@@ -33,7 +36,7 @@ var allowedScanContentTypes = map[string]bool{
 	"image/webp":                   true,
 }
 
-func saveScanUpload(header *multipart.FileHeader) (ScanFile, error) {
+func saveScanUpload(config Config, header *multipart.FileHeader) (ScanFile, error) {
 	if header == nil {
 		return ScanFile{}, errors.New("file is required")
 	}
@@ -74,6 +77,9 @@ func saveScanUpload(header *multipart.FileHeader) (ScanFile, error) {
 
 	datePath := time.Now().Format("20060102")
 	key := filepath.ToSlash(filepath.Join("scan", datePath, fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeFileName(header.Filename))))
+	if config.StorageDriver == "obs" {
+		return saveOBSUpload(config.OBS, file, header, key, contentType)
+	}
 	targetPath := filepath.Join(localUploadRoot(), filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return ScanFile{}, err
@@ -101,12 +107,49 @@ func saveScanUpload(header *multipart.FileHeader) (ScanFile, error) {
 	}, nil
 }
 
+func saveOBSUpload(config OBSConfig, body io.Reader, header *multipart.FileHeader, key, contentType string) (ScanFile, error) {
+	if config.Endpoint == "" || config.Bucket == "" || config.AccessKeyID == "" || config.SecretAccessKey == "" {
+		return ScanFile{}, errors.New("OBS configuration is incomplete")
+	}
+	client, err := obs.New(config.AccessKeyID, config.SecretAccessKey, normalizeOBSEndpoint(config.Endpoint, config.Bucket))
+	if err != nil {
+		return ScanFile{}, fmt.Errorf("create OBS client: %w", err)
+	}
+	defer client.Close()
+	output, err := client.PutObject(&obs.PutObjectInput{
+		PutObjectBasicInput: obs.PutObjectBasicInput{
+			ObjectOperationInput: obs.ObjectOperationInput{Bucket: config.Bucket, Key: key},
+			HttpHeader:           obs.HttpHeader{ContentType: contentType},
+			ContentLength:        header.Size,
+		},
+		Body: body,
+	})
+	if err != nil {
+		return ScanFile{}, fmt.Errorf("upload to OBS: %w", err)
+	}
+	objectURL := output.ObjectUrl
+	if objectURL == "" {
+		objectURL = strings.TrimRight(config.Endpoint, "/") + "/" + key
+	}
+	return ScanFile{Key: key, FileName: header.Filename, ContentType: contentType, Size: header.Size, URL: objectURL}, nil
+}
+
+func normalizeOBSEndpoint(raw, bucket string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return raw
+	}
+	parsed.Host = strings.TrimPrefix(parsed.Host, bucket+".")
+	return strings.TrimRight(parsed.String(), "/")
+}
+
 func localUploadRoot() string {
 	if root := env("UPLOAD_ROOT", ""); root != "" {
 		return root
 	}
-	if path, ok := findUp(".env.local"); ok {
-		return filepath.Join(filepath.Dir(path), "data", "uploads")
+	if path, ok := findUp(filepath.Join("config", "config.yaml")); ok {
+		serviceRoot := filepath.Dir(filepath.Dir(path))
+		return filepath.Join(serviceRoot, "data", "uploads")
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		return filepath.Join(cwd, "data", "uploads")

@@ -93,17 +93,17 @@ flowchart LR
 
 ### 开发调试配置
 
-本地开发调试配置通过 `club/.env.local` 注入。该文件已加入 `.gitignore`，用于放置真实的 MySQL、Redis、OBS 等调试连接信息，不要提交到仓库。
+Go API 的开发调试配置放在已忽略的 `services/api/config/config.yaml`。从 `config.example.yaml` 复制后填写真实连接信息，密钥不得提交。API 会从当前工作目录向上查找 `config/config.yaml`，不读取项目根目录的 `dev-info` 或 `.env.local`。
 
-安全模板放在 `club/.env.example`，新增同事或新环境可复制后填写：
+Python AI Worker 仍通过 `club/.env.local` 注入环境变量；安全模板放在 `club/.env.example`：
 
 ```bash
 cp .env.example .env.local
 ```
 
-当前服务会在启动时从当前目录向上查找 `.env.local`：
+配置加载规则：
 
-- Go API：读取 `APP_ENV`、`PORT`、`MYSQL_*`、`REDIS_*`、`MINIO_*`、`OBS_*`。
+- Go API：先读取 `services/api/config/config.yaml`，再使用 `APP_ENV`、`PORT`、`MYSQL_*`、`REDIS_*`、`MINIO_*`、`OBS_*` 环境变量覆盖同名配置。
 - Python AI Worker：读取 `AI_WORKER_PORT`、`MYSQL_*`、`REDIS_*`、`OBS_*`。
 - `/health` 只返回脱敏后的配置状态，例如地址、库名、是否提供密钥，不返回密码或 Secret。
 - `GET /api/dev/connections` 用当前开发配置检查 MySQL、Redis、OBS/MinIO 连通性，仅返回连接状态和延迟，不返回密钥。

@@ -104,6 +104,65 @@ var schemaStatements = []string{
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		PRIMARY KEY (teacher_id, class_id, subject)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS subjects (
+		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) NOT NULL,
+		name VARCHAR(60) NOT NULL,
+		code VARCHAR(40) DEFAULT '',
+		status VARCHAR(30) NOT NULL DEFAULT 'active',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_subjects_school_name (school_id, name),
+		INDEX idx_subjects_school (school_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS teacher_grades (
+		teacher_id VARCHAR(40) NOT NULL,
+		grade_id VARCHAR(40) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (teacher_id, grade_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS teacher_subjects (
+		teacher_id VARCHAR(40) NOT NULL,
+		subject_id VARCHAR(40) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (teacher_id, subject_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS guardian_invitations (
+		id VARCHAR(40) PRIMARY KEY,
+		student_id VARCHAR(40) NOT NULL,
+		teacher_id VARCHAR(40) NOT NULL,
+		token_hash CHAR(64) NOT NULL,
+		mobile_hint VARCHAR(40) DEFAULT '',
+		status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		expires_at DATETIME NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_guardian_invitation_token (token_hash),
+		INDEX idx_guardian_invitations_student (student_id, status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS guardian_certifications (
+		id VARCHAR(40) PRIMARY KEY,
+		invitation_id VARCHAR(40) NOT NULL,
+		student_id VARCHAR(40) NOT NULL,
+		guardian_id VARCHAR(40) NOT NULL,
+		relationship VARCHAR(40) NOT NULL,
+		evidence_object_key VARCHAR(255) DEFAULT '',
+		status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		reviewer_id VARCHAR(40) DEFAULT '',
+		review_note VARCHAR(255) DEFAULT '',
+		submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		reviewed_at DATETIME NULL,
+		UNIQUE KEY uk_guardian_certification_pair (student_id, guardian_id),
+		INDEX idx_guardian_certifications_status (status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS ai_capability_requests (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		capability VARCHAR(60) NOT NULL,
+		user_id VARCHAR(40) DEFAULT '',
+		student_id VARCHAR(40) NOT NULL,
+		channel VARCHAR(40) NOT NULL DEFAULT 'portal',
+		status VARCHAR(30) NOT NULL DEFAULT 'waitlisted',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_ai_capability_requests_student (student_id, capability)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS knowledge_points (
 		id VARCHAR(40) PRIMARY KEY,
 		name VARCHAR(100) NOT NULL,
@@ -504,6 +563,12 @@ var seedStatements = []string{
 	`INSERT IGNORE INTO classes (id, school_id, campus_id, grade_id, name, grade) VALUES ('class_603', 'school_001', 'campus_main', 'grade_6', '六年级 3 班', '六年级')`,
 	`INSERT IGNORE INTO teachers (id, user_id, school_id, name, subject, role) VALUES ('teacher_001', 'user_teacher_001', 'school_001', '陈老师', '数学', 'subject_teacher')`,
 	`INSERT IGNORE INTO teacher_classes (teacher_id, class_id, subject) VALUES ('teacher_001', 'class_603', '数学')`,
+	`INSERT IGNORE INTO subjects (id, school_id, name, code) VALUES
+		('subject_math', 'school_001', '数学', 'math'),
+		('subject_chinese', 'school_001', '语文', 'chinese'),
+		('subject_english', 'school_001', '英语', 'english')`,
+	`INSERT IGNORE INTO teacher_grades (teacher_id, grade_id) VALUES ('teacher_001', 'grade_6')`,
+	`INSERT IGNORE INTO teacher_subjects (teacher_id, subject_id) VALUES ('teacher_001', 'subject_math')`,
 	`INSERT IGNORE INTO guardians (id, user_id, name, mobile, relationship) VALUES
 		('guardian_001', 'user_guardian_001', '张三家长', '13800000011', 'parent'),
 		('guardian_002', 'user_guardian_002', '李四家长', '13800000012', 'parent'),

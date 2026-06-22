@@ -19,7 +19,10 @@ type App struct {
 }
 
 func NewApp() *App {
-	config := LoadConfig()
+	return NewAppWithConfig(LoadConfig())
+}
+
+func NewAppWithConfig(config Config) *App {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -32,7 +35,11 @@ func NewApp() *App {
 }
 
 func NewRouter() http.Handler {
-	app := NewApp()
+	return NewRouterWithConfig(LoadConfig())
+}
+
+func NewRouterWithConfig(config Config) http.Handler {
+	app := NewAppWithConfig(config)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", app.handleHealth)
 	mux.HandleFunc("GET /api/dashboard", app.handleDashboard)
@@ -72,6 +79,15 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("POST /api/mistakes/repractice", app.handleCreateRepracticeTask)
 	mux.HandleFunc("GET /api/learning/profile", app.handleLearningProfile)
 	mux.HandleFunc("GET /api/reports/guardian", app.handleGuardianReport)
+	mux.HandleFunc("GET /api/organization/graph", app.handleOrganizationGraph)
+	mux.HandleFunc("POST /api/organization/{kind}", app.handleOrganizationCreate)
+	mux.HandleFunc("POST /api/guardian/invitations", app.handleGuardianInvitation)
+	mux.HandleFunc("POST /api/guardian/certifications", app.handleGuardianCertification)
+	mux.HandleFunc("GET /api/guardian/certifications", app.handleCertificationList)
+	mux.HandleFunc("PATCH /api/guardian/certifications/{certificationID}", app.handleCertificationDecision)
+	mux.HandleFunc("GET /api/portal/student", app.handleStudentPortal)
+	mux.HandleFunc("GET /api/portal/guardian", app.handleGuardianPortal)
+	mux.HandleFunc("POST /api/ai/capabilities/{capability}/requests", app.handleAICapabilityRequest)
 	mux.HandleFunc("GET /api/dev/connections", app.handleDevConnections)
 	mux.HandleFunc("POST /api/dev/reset-demo", app.handleResetDemo)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(localUploadRoot()))))
@@ -115,7 +131,7 @@ func (app *App) handleScanUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	files := make([]ScanFile, 0, len(headers))
 	for _, header := range headers {
-		file, err := saveScanUpload(header)
+		file, err := saveScanUpload(app.config, header)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

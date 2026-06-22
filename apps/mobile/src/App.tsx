@@ -9,7 +9,20 @@ import {
   View
 } from "react-native";
 
-type Tab = "tasks" | "upload" | "mistakes" | "report";
+type Tab = "overview" | "tasks" | "upload" | "mistakes" | "report";
+
+const scoreSummary = [
+  { label: "我的成绩", value: "85" },
+  { label: "最高分", value: "96" },
+  { label: "最低分", value: "62" },
+  { label: "平均分", value: "81.6" }
+];
+
+const scoreTrend = [
+  { label: "单元测", score: 76 },
+  { label: "月考", score: 81 },
+  { label: "期中", score: 85 }
+];
 
 const tasks = [
   { id: "t1", title: "六年级数学期中卷", status: "待提交", due: "今晚 20:00", subject: "数学" },
@@ -33,9 +46,10 @@ const guardianReport = {
 };
 
 function App(): React.JSX.Element {
-  const [tab, setTab] = useState<Tab>("tasks");
+  const [tab, setTab] = useState<Tab>("overview");
 
   const title = useMemo(() => {
+    if (tab === "overview") return "学习总览";
     if (tab === "tasks") return "学习任务";
     if (tab === "upload") return "拍照提交";
     if (tab === "mistakes") return "错题本";
@@ -56,6 +70,7 @@ function App(): React.JSX.Element {
       </View>
 
       <View style={styles.tabs}>
+        <TabButton active={tab === "overview"} label="总览" onPress={() => setTab("overview")} />
         <TabButton active={tab === "tasks"} label="任务" onPress={() => setTab("tasks")} />
         <TabButton active={tab === "upload"} label="上传" onPress={() => setTab("upload")} />
         <TabButton active={tab === "mistakes"} label="错题" onPress={() => setTab("mistakes")} />
@@ -63,6 +78,18 @@ function App(): React.JSX.Element {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
+        {tab === "overview" && (
+          <View style={styles.overviewStack}>
+            <View style={styles.scoreGrid}>
+              {scoreSummary.map((item) => <View style={styles.scoreCard} key={item.label}><Text style={styles.scoreLabel}>{item.label}</Text><Text style={styles.scoreValue}>{item.value}</Text><Text style={styles.scoreMeta}>六年级 3 班</Text></View>)}
+            </View>
+            <View style={styles.trendCard}>
+              <View style={styles.sectionHead}><Text style={styles.uploadTitle}>成绩趋势</Text><Text style={styles.status}>+9 分</Text></View>
+              <View style={styles.trendRows}>{scoreTrend.map((item) => <View style={styles.trendRow} key={item.label}><Text style={styles.rowMeta}>{item.label}</Text><View style={styles.trendTrack}><View style={[styles.trendFill, { width: `${item.score}%` }]} /></View><Text style={styles.trendScore}>{item.score}</Text></View>)}</View>
+            </View>
+            <View style={styles.trendCard}><View style={styles.sectionHead}><Text style={styles.uploadTitle}>作业完成</Text><Text style={styles.status}>2/3 已完成</Text></View><Text style={styles.uploadCopy}>“分数应用题专项”将在明天 18:00 截止，建议今天完成。</Text></View>
+          </View>
+        )}
         {tab === "tasks" && (
           <View style={styles.section}>
             {tasks.map((task) => (
@@ -131,6 +158,10 @@ function App(): React.JSX.Element {
                 <Text style={styles.actionText}>{item}</Text>
               </View>
             ))}
+            <View style={styles.aiSection}>
+              <Text style={styles.reportSubtitle}>个性化提升服务</Text>
+              {[{ title: "AI 学情分析", copy: "分析学科与知识点短板，输出个人补漏地图" }, { title: "天梯攻略", copy: "生成阶段练习册，并按掌握情况周期复核" }].map((item) => <View style={styles.aiCard} key={item.title}><Text style={styles.rowTitle}>{item.title}</Text><Text style={styles.uploadCopy}>{item.copy}</Text><Text style={styles.aiPlanned}>即将开放 · 登记体验意向</Text></View>)}
+            </View>
           </View>
         )}
       </ScrollView>
@@ -208,6 +239,22 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingTop: 0
   },
+  overviewStack: { gap: 14 },
+  scoreGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  scoreCard: { backgroundColor: "#ffffff", borderColor: "#e5eaf1", borderRadius: 10, borderWidth: 1, padding: 14, width: "48%" },
+  scoreLabel: { color: "#667085", fontSize: 12 },
+  scoreValue: { color: "#123c62", fontSize: 26, fontWeight: "800", marginTop: 4 },
+  scoreMeta: { color: "#98a2b3", fontSize: 11, marginTop: 3 },
+  trendCard: { backgroundColor: "#ffffff", borderColor: "#e5eaf1", borderRadius: 10, borderWidth: 1, padding: 16 },
+  sectionHead: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  trendRows: { gap: 13, marginTop: 18 },
+  trendRow: { alignItems: "center", flexDirection: "row", gap: 10 },
+  trendTrack: { backgroundColor: "#e8eef2", borderRadius: 6, flex: 1, height: 9, overflow: "hidden" },
+  trendFill: { backgroundColor: "#0d7c66", borderRadius: 6, height: 9 },
+  trendScore: { color: "#123c62", fontSize: 13, fontWeight: "800", width: 24 },
+  aiSection: { borderTopColor: "#e5eaf1", borderTopWidth: 1, gap: 10, marginTop: 20, paddingTop: 4 },
+  aiCard: { backgroundColor: "#f1f8f7", borderRadius: 10, padding: 14 },
+  aiPlanned: { color: "#0d7c66", fontSize: 12, fontWeight: "800", marginTop: 10 },
   section: {
     backgroundColor: "#ffffff",
     borderColor: "#e5eaf1",

@@ -9,4 +9,4 @@ __pycache__/
 *.pyc
 .env
 .env.local
-
+services/api/config/config.yaml

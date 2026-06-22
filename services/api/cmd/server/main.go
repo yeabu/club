@@ -3,23 +3,19 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 
 	"club/services/api/internal/app"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	config := app.LoadConfig()
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: app.NewRouter(),
+		Addr:    ":" + config.Port,
+		Handler: app.NewRouterWithConfig(config),
 	}
 
-	log.Printf("club api listening on http://localhost:%s", port)
+	log.Printf("club api listening on http://localhost:%s", config.Port)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

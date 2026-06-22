@@ -40,6 +40,15 @@
 - `POST /api/mistakes/repractice`
 - `GET /api/learning/profile`
 - `GET /api/reports/guardian`
+- `GET /api/organization/graph`
+- `POST /api/organization/{kind}` (`schools|grades|subjects|classes|teachers|students`)
+- `POST /api/guardian/invitations`
+- `POST /api/guardian/certifications`
+- `GET /api/guardian/certifications?status=pending`
+- `PATCH /api/guardian/certifications/{certificationID}`
+- `GET /api/portal/student?studentId={studentID}`
+- `GET /api/portal/guardian?guardianId={guardianID}&studentId={studentID}`
+- `POST /api/ai/capabilities/{analysis|ladder}/requests`
 - `GET /api/dev/connections`
 - `POST /api/dev/reset-demo`
 
@@ -62,7 +71,7 @@
 
 ## Scan Import
 
-`POST /api/scan/uploads` accepts multipart form files in the `files` field. Supported formats are PDF, PNG, JPG, WebP, and ZIP scan packages. Each file is limited to 25 MB. The development implementation writes files to the API upload store and returns object-style keys that can later map to MinIO or OBS.
+`POST /api/scan/uploads` accepts multipart form files in the `files` field. Supported formats are PDF, PNG, JPG, WebP, and ZIP scan packages. Each file is limited to 25 MB. When `storageDriver=obs`, the API uploads through the Huawei OBS SDK and stores the real bucket/key/URL metadata; other drivers currently use the local upload store.
 
 ```json
 {

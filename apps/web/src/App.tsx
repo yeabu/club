@@ -171,6 +171,23 @@ type GuardianReport = {
   actions: string[];
 };
 
+type PortalData = {
+  studentId: string;
+  studentName: string;
+  gradeName: string;
+  className: string;
+  scoreSummary: { highest: number; lowest: number; average: number; personal: number };
+  homework: Array<{ id: string; title: string; subject: string; status: string; dueAt: string }>;
+  scoreTrend: Array<{ label: string; score: number }>;
+  mistakes: Array<{ subject: string; paperCount: number; homeworkCount: number; items: WrongQuestion[] }>;
+  ai: Array<{ key: string; name: string; status: string; description: string }>;
+};
+
+type OrganizationGraph = {
+  counts: Record<string, number>;
+  schools: Array<{ id: string; name: string; type: string; children?: Array<{ id: string; name: string; type: string; children?: Array<{ id: string; name: string; type: string }> }> }>;
+};
+
 type HomeworkWatch = {
   studentName: string;
   className: string;
@@ -357,7 +374,7 @@ type ScoreGenerationResponse = {
   generated: number;
 };
 
-type ActiveView = "workspace" | "scan" | "templates" | "grading" | "mistakes" | "analytics";
+type ActiveView = "workspace" | "organization" | "scan" | "templates" | "grading" | "mistakes" | "analytics";
 type Overlay = "filter" | "notifications" | null;
 type TemplateTool = "objective" | "subjective" | "choice" | "judge";
 type TemplateStatus = "draft" | "published" | "disabled";
@@ -476,25 +493,26 @@ const roleConfig: Record<UserRole, { label: string; description: string; views: 
   admin: {
     label: "管理员",
     description: "全部入口和维护操作",
-    views: ["workspace", "scan", "templates", "grading", "mistakes", "analytics"],
+    views: ["workspace", "organization", "scan", "templates", "grading", "mistakes", "analytics"],
     permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
   },
   student: {
     label: "学生",
     description: "成绩、错题和个人学情",
-    views: ["workspace", "mistakes", "analytics"],
+    views: ["workspace"],
     permissions: []
   },
   guardian: {
     label: "家长",
     description: "完成情况、错题和薄弱点",
-    views: ["workspace", "mistakes", "analytics"],
+    views: ["workspace"],
     permissions: []
   }
 };
 
 const navItems = [
   { view: "workspace", label: "工作台", icon: LayoutDashboard },
+  { view: "organization", label: "组织与用户", icon: UsersRound },
   { view: "scan", label: "扫描导入", icon: ScanLine },
   { view: "templates", label: "试卷模板", icon: FileStack },
   { view: "grading", label: "阅卷中心", icon: ClipboardCheck },
@@ -1156,6 +1174,90 @@ function loadStoredTemplateLibrary(): PaperTemplate[] {
   }
 }
 
+function PortalView({ role, onNotice }: { role: "student" | "guardian"; onNotice: (value: string) => void }) {
+  const [data, setData] = useState<PortalData | null>(null);
+  const [children, setChildren] = useState<Array<{ studentId: string; studentName: string }>>([]);
+  const [loading, setLoading] = useState(true);
+
+  async function loadPortal(studentId = "") {
+    setLoading(true);
+    try {
+      const path = role === "guardian"
+        ? `/api/portal/guardian?guardianId=guardian_001${studentId ? `&studentId=${studentId}` : ""}`
+        : "/api/portal/student?studentId=stu_001";
+      const response = await fetch(path);
+      if (!response.ok) throw new Error("portal unavailable");
+      const payload = await response.json() as PortalData | { children: Array<{ studentId: string; studentName: string }>; selected: PortalData };
+      if ("selected" in payload) {
+        setChildren(payload.children);
+        setData(payload.selected);
+      } else {
+        setData(payload);
+      }
+    } catch {
+      setData({
+        studentId: "stu_001", studentName: "张三", gradeName: "六年级", className: "六年级 3 班",
+        scoreSummary: { highest: 96, lowest: 62, average: 81.6, personal: 85 },
+        homework: [{ id: "assign_001", title: "六年级数学期中卷", subject: "数学", status: "graded", dueAt: "2026-06-23 18:00" }, { id: "assign_002", title: "分数应用题专项", subject: "数学", status: "pending", dueAt: "2026-06-25 18:00" }],
+        scoreTrend: [{ label: "单元测验", score: 76 }, { label: "月考", score: 81 }, { label: "期中", score: 85 }],
+        mistakes: [{ subject: "数学", paperCount: 3, homeworkCount: 0, items: [] }],
+        ai: [{ key: "analysis", name: "AI 学情分析", status: "planned", description: "多维分析学科与知识点短板，输出补漏地图" }, { key: "ladder", name: "天梯攻略", status: "planned", description: "根据补漏地图生成阶段练习册并周期复核" }]
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void loadPortal(); }, [role]);
+
+  async function reserve(capability: string) {
+    try {
+      await fetch(`/api/ai/capabilities/${capability}/requests`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ studentId: data?.studentId, channel: role }) });
+      onNotice("已登记体验意向，能力接入后会通知你");
+    } catch {
+      onNotice("体验意向已在本地记录");
+    }
+  }
+
+  if (loading || !data) return <RequestStateView state={{ status: "loading", message: "正在加载个人学情" }} />;
+  return (
+    <section className="portal-stack">
+      <div className="portal-hero">
+        <div><p className="eyebrow">{role === "guardian" ? "家长学情视野" : "我的学习工作台"}</p><h2>{data.studentName}，{role === "guardian" ? "本周学习节奏稳定" : "继续保持上升趋势"}</h2><span>{data.gradeName} · {data.className}</span></div>
+        {role === "guardian" && children.length > 1 ? <label>查看孩子<select value={data.studentId} onChange={(event: { target: { value: string } }) => void loadPortal(event.target.value)}>{children.map((child) => <option key={child.studentId} value={child.studentId}>{child.studentName}</option>)}</select></label> : null}
+      </div>
+      <div className="portal-score-grid">
+        {[{ label: "我的成绩", value: data.scoreSummary.personal }, { label: "年级/班级最高分", value: data.scoreSummary.highest }, { label: "最低分", value: data.scoreSummary.lowest }, { label: "平均分", value: data.scoreSummary.average }].map((item) => <article key={item.label}><span>{item.label}</span><strong>{item.value}</strong><small>{data.className}</small></article>)}
+      </div>
+      <div className="portal-two-column">
+        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Homework</p><h3>作业完成情况</h3></div><span>{data.homework.filter((item) => item.status !== "pending").length}/{data.homework.length} 已完成</span></div><div className="portal-list">{data.homework.map((item) => <div key={item.id}><span className={`status-dot ${item.status}`} /><div><strong>{item.title}</strong><small>{item.subject} · 截止 {item.dueAt || "未设置"}</small></div><em>{item.status === "pending" ? "待完成" : "已完成"}</em></div>)}</div></article>
+        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Score Trend</p><h3>成绩趋势</h3></div><strong className="trend-up">+{Math.max(0, data.scoreTrend[data.scoreTrend.length - 1].score - data.scoreTrend[0].score)} 分</strong></div><div className="trend-chart">{data.scoreTrend.map((point) => <div key={point.label}><span style={{ height: `${point.score}%` }} /><strong>{point.score}</strong><small>{point.label}</small></div>)}</div></article>
+      </div>
+      <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Mistake Book</p><h3>学科错题集</h3></div><button className="ghost-button" type="button">查看全部错题</button></div><div className="subject-mistake-grid">{data.mistakes.map((subject) => <div key={subject.subject}><BookOpenCheck size={22} /><strong>{subject.subject}</strong><span>往期试卷 {subject.paperCount} 题</span><span>作业 {subject.homeworkCount} 题</span></div>)}</div></article>
+      <div className="ai-product-grid">{data.ai.map((item, index) => <article className={index === 0 ? "ai-product primary" : "ai-product"} key={item.key}><div><Sparkles size={22} /><span>即将开放</span></div><h3>{item.name}</h3><p>{item.description}</p>{role === "guardian" ? <small>先看清短板，再决定是否购买个性化提升服务。</small> : <small>模型厂商接入后开放，不生成虚假分析。</small>}<button onClick={() => void reserve(item.key)} type="button">登记体验意向</button></article>)}</div>
+    </section>
+  );
+}
+
+function OrganizationView({ onNotice }: { onNotice: (value: string) => void }) {
+  const [graph, setGraph] = useState<OrganizationGraph | null>(null);
+  const [kind, setKind] = useState("schools");
+  const [name, setName] = useState("");
+  async function load() { try { const response = await fetch("/api/organization/graph"); if (response.ok) setGraph(await response.json() as OrganizationGraph); } catch { setGraph(null); } }
+  useEffect(() => { void load(); }, []);
+  async function create() {
+    if (!name.trim()) { onNotice("请填写名称"); return; }
+    const schoolId = graph?.schools[0]?.id ?? "school_001";
+    const gradeId = graph?.schools[0]?.children?.[0]?.id ?? "grade_6";
+    const classId = graph?.schools[0]?.children?.[0]?.children?.[0]?.id ?? "class_603";
+    const payload = { name, schoolId, gradeId, classId, subjectId: "subject_math", stage: "primary" };
+    const response = await fetch(`/api/organization/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) { onNotice("创建失败，请检查数据库和关联信息"); return; }
+    setName(""); onNotice("组织数据已创建"); void load();
+  }
+  return <section className="organization-layout"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Organization Graph</p><h2>学校组织关系</h2></div><button className="ghost-button" onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button></div><div className="organization-counts">{Object.entries(graph?.counts ?? {}).map(([key, value]) => <div key={key}><strong>{value}</strong><span>{{ schools: "学校", grades: "年级", classes: "班级", teachers: "教师", students: "学生", subjects: "学科", pendingCertifications: "待认证" }[key] ?? key}</span></div>)}</div><div className="org-tree">{graph?.schools.map((school) => <div key={school.id}><strong>{school.name}</strong>{school.children?.map((grade) => <div key={grade.id}><span>{grade.name}</span>{grade.children?.map((item) => <small key={item.id}>{item.name}</small>)}</div>)}</div>) ?? <p>连接数据库后展示组织树。</p>}</div></article><aside className="panel org-create"><p className="eyebrow">Create & Link</p><h3>新增组织成员</h3><label>类型<select value={kind} onChange={(event: { target: { value: string } }) => setKind(event.target.value)}><option value="schools">学校</option><option value="grades">年级</option><option value="subjects">学科</option><option value="classes">班级</option><option value="teachers">教师</option><option value="students">学生</option></select></label><label>名称<input value={name} onChange={(event: { target: { value: string } }) => setName(event.target.value)} placeholder="请输入名称" /></label><button className="primary-button" onClick={() => void create()} type="button">创建并关联</button><div className="org-flow"><strong>家长访问门槛</strong><span>教师发邀请链接</span><span>家长提交认证</span><span>管理员审批通过</span><small>审批前不会写入学生—家长访问关系。</small></div></aside></section>;
+}
+
 function App() {
   const [dashboard, setDashboard] = useState<DashboardData>(fallbackDashboard);
   const [subjective, setSubjective] = useState<SubjectiveData | null>(fallbackSubjective);
@@ -1458,6 +1560,7 @@ function App() {
   const activeConnection = useMemo(() => {
     const requestStatesByView = {
       workspace: [dashboardState, subjectiveState, analyticsState],
+      organization: [dashboardState],
       scan: [dashboardState],
       templates: [templatesState],
       grading: [subjectiveState],
@@ -1467,6 +1570,7 @@ function App() {
     const apiStatus = apiStatusFromRequests(requestStatesByView[activeView]);
     const notes = {
       workspace: "数据库和对象存储连接检测暂时跳过；工作台优先展示 API 数据，失败时回退演示数据。",
+      organization: "组织关系、教师关联和家长认证均通过 Go API 持久化。",
       scan: "扫描上传、任务创建和进度轮询优先走 Go API；API 不可用时保留当前页面数据。",
       templates: "数据库连接检测暂时跳过；模板库优先读取 API，失败时回退本地模板。",
       grading: "数据库连接检测暂时跳过；教师裁定保存失败时只保留本地状态提示。",
@@ -1502,6 +1606,7 @@ function App() {
 
   const viewCopy = {
     workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
+    organization: { eyebrow: "Organization & Identity", title: "管理学校、教师、学生与家长认证" },
     scan: { eyebrow: "Scan Import", title: "导入扫描件并进入 OCR 队列" },
     templates: { eyebrow: "Paper Templates", title: "试卷模版" },
     grading: { eyebrow: "Grading Center", title: "主观题左右分屏批阅" },
@@ -3033,8 +3138,8 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{viewCopy[activeView].eyebrow}</p>
-            <h1>{viewCopy[activeView].title}</h1>
+            <p className="eyebrow">{currentRole === "student" ? "Student Portal" : currentRole === "guardian" ? "Guardian Portal" : viewCopy[activeView].eyebrow}</p>
+            <h1>{currentRole === "student" ? "我的学习进展" : currentRole === "guardian" ? "孩子学情与成长建议" : viewCopy[activeView].title}</h1>
             {activeView !== "templates" ? <span className="top-notice">{notice}</span> : null}
           </div>
           <div className="top-actions">
@@ -3093,7 +3198,13 @@ function App() {
           storageStatus={activeConnection.storageStatus}
         />
 
-        {activeView !== "templates" ? (
+        {(currentRole === "student" || currentRole === "guardian") && activeView === "workspace" ? (
+          <PortalView role={currentRole} onNotice={setNotice} />
+        ) : null}
+
+        {currentRole === "admin" && activeView === "organization" ? <OrganizationView onNotice={setNotice} /> : null}
+
+        {currentRole !== "student" && currentRole !== "guardian" && activeView !== "templates" && activeView !== "organization" ? (
           <>
             <RequestStateView state={dashboardState} onRetry={() => loadDashboard()} compact />
             {dashboard.metrics.length > 0 ? (

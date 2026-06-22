@@ -1,87 +1,97 @@
 package app
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	AppEnv        string      `json:"appEnv"`
-	Port          string      `json:"port"`
-	MySQL         MySQLConfig `json:"mysql"`
-	Redis         RedisConfig `json:"redis"`
-	StorageDriver string      `json:"storageDriver"`
-	MinIO         MinIOConfig `json:"minio"`
-	OBS           OBSConfig   `json:"obs"`
+	AppEnv        string      `json:"appEnv" yaml:"appEnv"`
+	Port          string      `json:"port" yaml:"port"`
+	MySQL         MySQLConfig `json:"mysql" yaml:"mysql"`
+	Redis         RedisConfig `json:"redis" yaml:"redis"`
+	StorageDriver string      `json:"storageDriver" yaml:"storageDriver"`
+	MinIO         MinIOConfig `json:"minio" yaml:"minio"`
+	OBS           OBSConfig   `json:"obs" yaml:"obs"`
 }
 
 type MySQLConfig struct {
-	Host     string `json:"host"`
-	Port     string `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"-"`
-	Database string `json:"database"`
+	Host     string `json:"host" yaml:"host"`
+	Port     string `json:"port" yaml:"port"`
+	User     string `json:"user" yaml:"user"`
+	Password string `json:"-" yaml:"password"`
+	Database string `json:"database" yaml:"database"`
 }
 
 type RedisConfig struct {
-	Addr     string `json:"addr"`
-	Password string `json:"-"`
-	DB       int    `json:"db"`
+	Addr     string `json:"addr" yaml:"addr"`
+	Password string `json:"-" yaml:"password"`
+	DB       int    `json:"db" yaml:"db"`
 }
 
 type MinIOConfig struct {
-	Endpoint  string `json:"endpoint"`
-	AccessKey string `json:"-"`
-	SecretKey string `json:"-"`
-	Bucket    string `json:"bucket"`
-	UseSSL    bool   `json:"useSSL"`
+	Endpoint  string `json:"endpoint" yaml:"endpoint"`
+	AccessKey string `json:"-" yaml:"accessKey"`
+	SecretKey string `json:"-" yaml:"secretKey"`
+	Bucket    string `json:"bucket" yaml:"bucket"`
+	UseSSL    bool   `json:"useSSL" yaml:"useSSL"`
 }
 
 type OBSConfig struct {
-	Endpoint        string `json:"endpoint"`
-	AccessKeyID     string `json:"-"`
-	SecretAccessKey string `json:"-"`
-	Bucket          string `json:"bucket"`
-	Region          string `json:"region"`
+	Endpoint        string `json:"endpoint" yaml:"endpoint"`
+	AccessKeyID     string `json:"-" yaml:"accessKeyId"`
+	SecretAccessKey string `json:"-" yaml:"secretAccessKey"`
+	Bucket          string `json:"bucket" yaml:"bucket"`
+	Region          string `json:"region" yaml:"region"`
 }
 
 func LoadConfig() Config {
-	loadDotEnv(".env.local")
-
-	return Config{
-		AppEnv: env("APP_ENV", "development"),
-		Port:   env("PORT", "8080"),
+	config := Config{
+		AppEnv: "development",
+		Port:   "8080",
 		MySQL: MySQLConfig{
-			Host:     env("MYSQL_HOST", "127.0.0.1"),
-			Port:     env("MYSQL_PORT", "3306"),
-			User:     env("MYSQL_USER", "root"),
-			Password: env("MYSQL_PASSWORD", ""),
-			Database: env("MYSQL_DATABASE", "club"),
+			Host:     "127.0.0.1",
+			Port:     "3306",
+			User:     "root",
+			Database: "club",
 		},
 		Redis: RedisConfig{
-			Addr:     env("REDIS_ADDR", "127.0.0.1:6379"),
-			Password: env("REDIS_PASSWORD", ""),
-			DB:       envInt("REDIS_DB", 0),
+			Addr: "127.0.0.1:6379",
 		},
-		StorageDriver: env("STORAGE_DRIVER", "minio"),
+		StorageDriver: "minio",
 		MinIO: MinIOConfig{
-			Endpoint:  env("MINIO_ENDPOINT", "127.0.0.1:9000"),
-			AccessKey: env("MINIO_ACCESS_KEY", ""),
-			SecretKey: env("MINIO_SECRET_KEY", ""),
-			Bucket:    env("MINIO_BUCKET", "club-dev"),
-			UseSSL:    envBool("MINIO_USE_SSL", false),
-		},
-		OBS: OBSConfig{
-			Endpoint:        env("OBS_ENDPOINT", ""),
-			AccessKeyID:     env("OBS_ACCESS_KEY_ID", ""),
-			SecretAccessKey: env("OBS_SECRET_ACCESS_KEY", ""),
-			Bucket:          env("OBS_BUCKET", ""),
-			Region:          env("OBS_REGION", ""),
+			Endpoint: "127.0.0.1:9000",
+			Bucket:   "club-dev",
 		},
 	}
+	loadYAMLConfig(filepath.Join("config", "config.yaml"), &config)
+
+	config.AppEnv = env("APP_ENV", config.AppEnv)
+	config.Port = env("PORT", config.Port)
+	config.MySQL.Host = env("MYSQL_HOST", config.MySQL.Host)
+	config.MySQL.Port = env("MYSQL_PORT", config.MySQL.Port)
+	config.MySQL.User = env("MYSQL_USER", config.MySQL.User)
+	config.MySQL.Password = env("MYSQL_PASSWORD", config.MySQL.Password)
+	config.MySQL.Database = env("MYSQL_DATABASE", config.MySQL.Database)
+	config.Redis.Addr = env("REDIS_ADDR", config.Redis.Addr)
+	config.Redis.Password = env("REDIS_PASSWORD", config.Redis.Password)
+	config.Redis.DB = envInt("REDIS_DB", config.Redis.DB)
+	config.StorageDriver = env("STORAGE_DRIVER", config.StorageDriver)
+	config.MinIO.Endpoint = env("MINIO_ENDPOINT", config.MinIO.Endpoint)
+	config.MinIO.AccessKey = env("MINIO_ACCESS_KEY", config.MinIO.AccessKey)
+	config.MinIO.SecretKey = env("MINIO_SECRET_KEY", config.MinIO.SecretKey)
+	config.MinIO.Bucket = env("MINIO_BUCKET", config.MinIO.Bucket)
+	config.MinIO.UseSSL = envBool("MINIO_USE_SSL", config.MinIO.UseSSL)
+	config.OBS.Endpoint = env("OBS_ENDPOINT", config.OBS.Endpoint)
+	config.OBS.AccessKeyID = env("OBS_ACCESS_KEY_ID", config.OBS.AccessKeyID)
+	config.OBS.SecretAccessKey = env("OBS_SECRET_ACCESS_KEY", config.OBS.SecretAccessKey)
+	config.OBS.Bucket = env("OBS_BUCKET", config.OBS.Bucket)
+	config.OBS.Region = env("OBS_REGION", config.OBS.Region)
+	return config
 }
 
 func (c Config) Public() map[string]any {
@@ -145,35 +155,16 @@ func envBool(key string, fallback bool) bool {
 	return value == "true" || value == "1" || value == "yes"
 }
 
-func loadDotEnv(name string) {
+func loadYAMLConfig(name string, config *Config) {
 	path, ok := findUp(name)
 	if !ok {
 		return
 	}
-
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
-		if key == "" || os.Getenv(key) != "" {
-			continue
-		}
-		_ = os.Setenv(key, value)
-	}
+	_ = yaml.Unmarshal(data, config)
 }
 
 func findUp(name string) (string, bool) {
