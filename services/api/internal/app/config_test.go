@@ -11,11 +11,13 @@ func TestLoadConfigFromYAMLAndEnvironmentOverride(t *testing.T) {
 		"APP_ENV", "PORT", "MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE",
 		"REDIS_ADDR", "REDIS_PASSWORD", "REDIS_DB", "STORAGE_DRIVER", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY",
 		"MINIO_SECRET_KEY", "MINIO_BUCKET", "MINIO_USE_SSL", "OBS_ENDPOINT", "OBS_ACCESS_KEY_ID",
-		"OBS_SECRET_ACCESS_KEY", "OBS_BUCKET", "OBS_REGION",
+		"OBS_SECRET_ACCESS_KEY", "OBS_BUCKET", "OBS_REGION", "AI_PROVIDER_NAME", "AI_PROVIDER_BASE_URL",
+		"AI_PROVIDER_API_KEY", "AI_PROVIDER_TIMEOUT_SECONDS", "AI_PROVIDER_CALLBACK_SECRET",
 	} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("PORT", "9090")
+	t.Setenv("AI_PROVIDER_TIMEOUT_SECONDS", "45")
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -46,6 +48,12 @@ obs:
   secretAccessKey: secret
   bucket: reports
   region: cn-test-1
+aiProvider:
+  name: generic-http
+  baseUrl: https://ai-provider.example.com/tasks
+  apiKey: ai-secret
+  timeoutSeconds: 20
+  callbackSecret: callback-secret
 `)
 	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), data, 0o600); err != nil {
 		t.Fatal(err)
@@ -76,6 +84,9 @@ obs:
 	if cfg.StorageDriver != "obs" || cfg.OBS.Bucket != "reports" || !cfg.MinIO.UseSSL {
 		t.Fatalf("unexpected storage config: %+v", cfg)
 	}
+	if cfg.AIProvider.Name != "generic-http" || cfg.AIProvider.BaseURL != "https://ai-provider.example.com/tasks" || cfg.AIProvider.APIKey != "ai-secret" || cfg.AIProvider.TimeoutSeconds != 45 {
+		t.Fatalf("unexpected ai provider config: %+v", cfg.AIProvider)
+	}
 }
 
 func TestConfigPublicRedactsSecrets(t *testing.T) {
@@ -85,6 +96,8 @@ func TestConfigPublicRedactsSecrets(t *testing.T) {
 	t.Setenv("MINIO_SECRET_KEY", "secret")
 	t.Setenv("OBS_ACCESS_KEY_ID", "access")
 	t.Setenv("OBS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AI_PROVIDER_API_KEY", "secret")
+	t.Setenv("AI_PROVIDER_CALLBACK_SECRET", "callback-secret")
 
 	cfg := LoadConfig()
 	public := cfg.Public()
@@ -103,6 +116,14 @@ func TestConfigPublicRedactsSecrets(t *testing.T) {
 	}
 	if obs["secretProvided"] != true {
 		t.Fatal("obs secret presence should be exposed as a boolean")
+	}
+
+	aiProvider := public["aiProvider"].(map[string]any)
+	if aiProvider["apiKey"] != nil || aiProvider["callbackSecret"] != nil {
+		t.Fatal("ai provider secrets must not be exposed")
+	}
+	if aiProvider["apiKeyProvided"] != true || aiProvider["callbackSecretProvided"] != true {
+		t.Fatal("ai provider secret presence should be exposed as booleans")
 	}
 }
 

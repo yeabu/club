@@ -10,13 +10,14 @@ import (
 )
 
 type Config struct {
-	AppEnv        string      `json:"appEnv" yaml:"appEnv"`
-	Port          string      `json:"port" yaml:"port"`
-	MySQL         MySQLConfig `json:"mysql" yaml:"mysql"`
-	Redis         RedisConfig `json:"redis" yaml:"redis"`
-	StorageDriver string      `json:"storageDriver" yaml:"storageDriver"`
-	MinIO         MinIOConfig `json:"minio" yaml:"minio"`
-	OBS           OBSConfig   `json:"obs" yaml:"obs"`
+	AppEnv        string           `json:"appEnv" yaml:"appEnv"`
+	Port          string           `json:"port" yaml:"port"`
+	MySQL         MySQLConfig      `json:"mysql" yaml:"mysql"`
+	Redis         RedisConfig      `json:"redis" yaml:"redis"`
+	StorageDriver string           `json:"storageDriver" yaml:"storageDriver"`
+	MinIO         MinIOConfig      `json:"minio" yaml:"minio"`
+	OBS           OBSConfig        `json:"obs" yaml:"obs"`
+	AIProvider    AIProviderConfig `json:"aiProvider" yaml:"aiProvider"`
 }
 
 type MySQLConfig struct {
@@ -49,6 +50,14 @@ type OBSConfig struct {
 	Region          string `json:"region" yaml:"region"`
 }
 
+type AIProviderConfig struct {
+	Name           string `json:"name" yaml:"name"`
+	BaseURL        string `json:"baseUrl" yaml:"baseUrl"`
+	APIKey         string `json:"-" yaml:"apiKey"`
+	TimeoutSeconds int    `json:"timeoutSeconds" yaml:"timeoutSeconds"`
+	CallbackSecret string `json:"-" yaml:"callbackSecret"`
+}
+
 func LoadConfig() Config {
 	config := Config{
 		AppEnv: "development",
@@ -66,6 +75,10 @@ func LoadConfig() Config {
 		MinIO: MinIOConfig{
 			Endpoint: "127.0.0.1:9000",
 			Bucket:   "club-dev",
+		},
+		AIProvider: AIProviderConfig{
+			Name:           "generic-http",
+			TimeoutSeconds: 30,
 		},
 	}
 	loadYAMLConfig(filepath.Join("config", "config.yaml"), &config)
@@ -91,6 +104,17 @@ func LoadConfig() Config {
 	config.OBS.SecretAccessKey = env("OBS_SECRET_ACCESS_KEY", config.OBS.SecretAccessKey)
 	config.OBS.Bucket = env("OBS_BUCKET", config.OBS.Bucket)
 	config.OBS.Region = env("OBS_REGION", config.OBS.Region)
+	config.AIProvider.Name = env("AI_PROVIDER_NAME", config.AIProvider.Name)
+	config.AIProvider.BaseURL = env("AI_PROVIDER_BASE_URL", config.AIProvider.BaseURL)
+	config.AIProvider.APIKey = env("AI_PROVIDER_API_KEY", config.AIProvider.APIKey)
+	config.AIProvider.TimeoutSeconds = envInt("AI_PROVIDER_TIMEOUT_SECONDS", config.AIProvider.TimeoutSeconds)
+	config.AIProvider.CallbackSecret = env("AI_PROVIDER_CALLBACK_SECRET", config.AIProvider.CallbackSecret)
+	if config.AIProvider.Name == "" {
+		config.AIProvider.Name = "generic-http"
+	}
+	if config.AIProvider.TimeoutSeconds <= 0 {
+		config.AIProvider.TimeoutSeconds = 30
+	}
 	return config
 }
 
@@ -124,6 +148,14 @@ func (c Config) Public() map[string]any {
 			"region":            c.OBS.Region,
 			"accessKeyProvided": c.OBS.AccessKeyID != "",
 			"secretProvided":    c.OBS.SecretAccessKey != "",
+		},
+		"aiProvider": map[string]any{
+			"name":                   c.AIProvider.Name,
+			"baseUrl":                c.AIProvider.BaseURL,
+			"timeoutSeconds":         c.AIProvider.TimeoutSeconds,
+			"apiKeyProvided":         c.AIProvider.APIKey != "",
+			"callbackSecretProvided": c.AIProvider.CallbackSecret != "",
+			"configured":             c.AIProvider.BaseURL != "" && c.AIProvider.APIKey != "",
 		},
 	}
 }

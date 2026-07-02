@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.main import Worker, WorkerConfig, analyze_paper, detect_wrong_reason, grade_subjective, parse_xread_response
+from app.main import (
+    Worker,
+    WorkerConfig,
+    analyze_paper,
+    anthropic_messages_url,
+    detect_wrong_reason,
+    grade_subjective,
+    parse_ai_json_response,
+    parse_xread_response,
+)
 
 
 class WorkerPipelineTest(unittest.TestCase):
@@ -19,11 +28,17 @@ class WorkerPipelineTest(unittest.TestCase):
             redis_group="club-ai-worker",
             redis_consumer="test-worker",
             api_base_url="",
+            paddleocr_service_url="",
             result_dir=result_dir,
             sample_manifest=Path("samples/manifest.json"),
             model_version="test-model",
             storage_driver="local",
             enable_redis_consumer=False,
+            ai_provider="mock",
+            anthropic_base_url="",
+            anthropic_auth_token="",
+            anthropic_model="",
+            ai_timeout_seconds=1,
         )
 
     def test_template_analysis_returns_reviewable_regions(self) -> None:
@@ -73,6 +88,20 @@ class WorkerPipelineTest(unittest.TestCase):
         entries = parse_xread_response(response)
         self.assertEqual(entries[0][0], "1-0")
         self.assertEqual(entries[0][1]["taskId"], "scan_001")
+
+    def test_anthropic_messages_url_supports_compatible_base_url(self) -> None:
+        self.assertEqual(
+            anthropic_messages_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic/v1/messages",
+        )
+        self.assertEqual(
+            anthropic_messages_url("https://vendor.example/v1"),
+            "https://vendor.example/v1/messages",
+        )
+
+    def test_parse_ai_json_response_extracts_text_content(self) -> None:
+        result = parse_ai_json_response({"content": [{"type": "text", "text": "```json\n{\"score\": 8}\n```"}]})
+        self.assertEqual(result["score"], 8)
 
 
 if __name__ == "__main__":

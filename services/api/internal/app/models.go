@@ -1,5 +1,7 @@
 package app
 
+import "strings"
+
 type DashboardResponse struct {
 	Source        string          `json:"source,omitempty"`
 	Metrics       []Metric        `json:"metrics"`
@@ -18,6 +20,7 @@ type Metric struct {
 
 type ScanJob struct {
 	ID              string     `json:"id"`
+	ScanType        string     `json:"scanType"`
 	Title           string     `json:"title"`
 	ClassName       string     `json:"className"`
 	TemplateID      string     `json:"templateId,omitempty"`
@@ -53,6 +56,7 @@ type ScanUploadResponse struct {
 }
 
 type ScanTaskRequest struct {
+	ScanType        string     `json:"scanType"`
 	Title           string     `json:"title"`
 	ClassName       string     `json:"className"`
 	TemplateID      string     `json:"templateId"`
@@ -120,15 +124,28 @@ type ScanTaskPreviewResponse struct {
 }
 
 type ScanQueuePayload struct {
-	TaskID          string   `json:"taskId"`
-	Title           string   `json:"title"`
-	ClassName       string   `json:"className"`
-	TemplateID      string   `json:"templateId"`
-	TemplateVersion int      `json:"templateVersion"`
-	Pages           int      `json:"pages"`
-	FileKeys        []string `json:"fileKeys"`
-	RetryCount      int      `json:"retryCount"`
-	CreatedAt       string   `json:"createdAt"`
+	TaskID          string     `json:"taskId"`
+	ScanType        string     `json:"scanType"`
+	Title           string     `json:"title"`
+	ClassName       string     `json:"className"`
+	TemplateID      string     `json:"templateId"`
+	TemplateVersion int        `json:"templateVersion"`
+	Pages           int        `json:"pages"`
+	FileKeys        []string   `json:"fileKeys"`
+	Files           []ScanFile `json:"files"`
+	RetryCount      int        `json:"retryCount"`
+	CreatedAt       string     `json:"createdAt"`
+}
+
+func normalizeScanType(value string) string {
+	switch strings.TrimSpace(value) {
+	case "paper":
+		return "paper"
+	case "answer_sheet":
+		return "answer_sheet"
+	default:
+		return "answer_sheet"
+	}
 }
 
 type TemplateAISuggestionRequest struct {

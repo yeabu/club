@@ -4,8 +4,6 @@ import {
   BookOpenCheck,
   Check,
   ClipboardCheck,
-  Cloud,
-  Database,
   FileStack,
   LayoutDashboard,
   Loader2,
@@ -36,6 +34,7 @@ type Metric = {
 
 type ScanJob = {
   id: string;
+  scanType?: ScanType;
   title: string;
   className: string;
   templateId?: string;
@@ -50,6 +49,8 @@ type ScanJob = {
   queueMessage?: string;
   files?: ScanUploadFile[];
 };
+
+type ScanType = "paper" | "answer_sheet";
 
 type ScanUploadFile = {
   key: string;
@@ -176,16 +177,309 @@ type PortalData = {
   studentName: string;
   gradeName: string;
   className: string;
-  scoreSummary: { highest: number; lowest: number; average: number; personal: number };
+  scoreSummary: { highest?: number; lowest?: number; average?: number; personal: number };
+  gradeSummary?: PortalScoreStats;
+  classSummary?: PortalScoreStats;
+  homeworkSummary?: { total: number; completed: number; pending: number; overdue: number; completion: number; needsAttention: number };
   homework: Array<{ id: string; title: string; subject: string; status: string; dueAt: string }>;
   scoreTrend: Array<{ label: string; score: number }>;
   mistakes: Array<{ subject: string; paperCount: number; homeworkCount: number; items: WrongQuestion[] }>;
-  ai: Array<{ key: string; name: string; status: string; description: string }>;
+  weakPoints?: string[];
+  ai: Array<{ key: string; name: string; status: string; description: string; cta?: string; priceLabel?: string; valuePoint?: string }>;
+  offers?: Array<{ key: string; name: string; description: string; cta: string; priceLabel: string }>;
+};
+
+type GuardianChildLink = {
+  studentId: string;
+  studentName: string;
+  gradeName?: string;
+  className?: string;
+};
+
+type PortalScoreStats = {
+  scope: string;
+  name: string;
+  highest: number;
+  lowest: number;
+  average: number;
+  rank?: number;
+  total?: number;
+};
+
+const portalSubjectOrder = ["语文", "数学", "英语"];
+
+function makePortalWrongQuestion(subject: string, overrides: Partial<WrongQuestion>): WrongQuestion {
+  return {
+    id: overrides.id ?? 0,
+    studentId: overrides.studentId ?? "stu_001",
+    studentName: overrides.studentName ?? "张三",
+    className: overrides.className ?? "六年级 3 班",
+    submissionId: overrides.submissionId ?? `portal_${subject}`,
+    questionId: overrides.questionId ?? `portal_${subject}_q`,
+    questionNo: overrides.questionNo ?? "1",
+    questionType: overrides.questionType ?? "综合题",
+    knowledgePoint: overrides.knowledgePoint ?? subject,
+    errorType: overrides.errorType ?? "practice",
+    wrongReason: overrides.wrongReason ?? "需要结合近期作业继续巩固。",
+    sourcePaper: overrides.sourcePaper ?? `${subject}错题订正`,
+    originalQuestion: overrides.originalQuestion ?? "题干待同步",
+    score: overrides.score ?? 0,
+    maxScore: overrides.maxScore ?? 5,
+    correctAnswer: overrides.correctAnswer ?? "参考答案待同步",
+    studentAnswer: overrides.studentAnswer ?? "学生答案待同步",
+    answerImageUrl: overrides.answerImageUrl ?? "",
+    explanation: overrides.explanation ?? "先完成订正，再做同类题巩固。",
+    correctionStatus: overrides.correctionStatus ?? "pending",
+    repracticeStatus: overrides.repracticeStatus ?? "not_assigned",
+    createdAt: overrides.createdAt ?? "2026-07-02T09:00:00+08:00",
+    knowledge: overrides.knowledge ?? [overrides.knowledgePoint ?? subject],
+  };
+}
+
+function portalSubjectFallback(subject: string): PortalData["mistakes"][number] {
+  if (subject === "语文") {
+    return {
+      subject,
+      paperCount: 2,
+      homeworkCount: 1,
+      items: [
+        makePortalWrongQuestion(subject, { id: 9101, questionNo: "阅读 3", questionType: "阅读理解", knowledgePoint: "概括主旨", wrongReason: "答案只摘抄原文，缺少归纳表达。", sourcePaper: "语文阅读专项", score: 3, maxScore: 6 }),
+        makePortalWrongQuestion(subject, { id: 9102, questionNo: "作文", questionType: "习作", knowledgePoint: "细节描写", wrongReason: "叙事完整，但细节和情感表达偏弱。", sourcePaper: "单元习作训练", score: 24, maxScore: 30 }),
+      ],
+    };
+  }
+  if (subject === "英语") {
+    return {
+      subject,
+      paperCount: 1,
+      homeworkCount: 2,
+      items: [
+        makePortalWrongQuestion(subject, { id: 9301, questionNo: "完形 5", questionType: "完形填空", knowledgePoint: "时态辨析", wrongReason: "一般过去时和现在完成时混用。", sourcePaper: "英语单元测验", score: 0, maxScore: 2 }),
+        makePortalWrongQuestion(subject, { id: 9302, questionNo: "写作", questionType: "短文表达", knowledgePoint: "句型完整", wrongReason: "句子主谓结构不稳定，连接词使用较少。", sourcePaper: "英语写作训练", score: 6, maxScore: 10 }),
+      ],
+    };
+  }
+  return {
+    subject,
+    paperCount: 3,
+    homeworkCount: 2,
+    items: [
+      makePortalWrongQuestion(subject, { id: 9201, questionNo: "15", questionType: "应用题", knowledgePoint: "比例", wrongReason: "比例关系书写不规范，答语单位缺失。", sourcePaper: "六年级数学期中卷", score: 8, maxScore: 10 }),
+      makePortalWrongQuestion(subject, { id: 9202, questionNo: "18", questionType: "图形题", knowledgePoint: "几何面积", wrongReason: "组合图形拆分后面积计算不完整。", sourcePaper: "几何面积小测", score: 6, maxScore: 8 }),
+    ],
+  };
+}
+
+function normalizePortalSubjectMistakes(items: PortalData["mistakes"]): PortalData["mistakes"] {
+  const bySubject = new Map(items.map((item) => [item.subject, item]));
+  return portalSubjectOrder.map((subject) => {
+    const fallback = portalSubjectFallback(subject);
+    const current = bySubject.get(subject);
+    if (!current) {
+      return fallback;
+    }
+    return {
+      ...current,
+      paperCount: Math.max(current.paperCount, fallback.paperCount),
+      homeworkCount: Math.max(current.homeworkCount, fallback.homeworkCount),
+      items: current.items.length > 0 ? current.items : fallback.items,
+    };
+  });
+}
+
+function isPortalHomeworkDone(status: string) {
+  return ["graded", "completed", "uploaded", "reviewed"].includes(status);
+}
+
+function portalHomeworkFallback(subject: string): PortalData["homework"] {
+  if (subject === "语文") {
+    return [
+      { id: "portal_cn_001", title: "阅读理解订正", subject, status: "completed", dueAt: "2026-07-01 18:00" },
+      { id: "portal_cn_002", title: "单元习作修改", subject, status: "pending", dueAt: "2026-07-03 18:00" },
+    ];
+  }
+  if (subject === "英语") {
+    return [
+      { id: "portal_en_001", title: "单词听写订正", subject, status: "reviewed", dueAt: "2026-07-01 18:00" },
+      { id: "portal_en_002", title: "短文表达练习", subject, status: "pending", dueAt: "2026-07-04 18:00" },
+    ];
+  }
+  return [
+    { id: "portal_math_001", title: "六年级数学期中卷", subject, status: "graded", dueAt: "2026-06-23 18:00" },
+    { id: "portal_math_002", title: "分数应用题专项", subject, status: "pending", dueAt: "2026-06-25 18:00" },
+  ];
+}
+
+function normalizePortalSubjectHomework(items: PortalData["homework"]) {
+  return portalSubjectOrder.map((subject) => {
+    const subjectItems = items.filter((item) => item.subject === subject);
+    const homework = subjectItems.length > 0 ? subjectItems : portalHomeworkFallback(subject);
+    const completed = homework.filter((item) => isPortalHomeworkDone(item.status)).length;
+    const overdue = homework.filter((item) => item.status === "overdue").length;
+    return {
+      subject,
+      homework,
+      completed,
+      pending: Math.max(0, homework.length - completed - overdue),
+      overdue,
+      completion: homework.length ? Math.round((completed / homework.length) * 100) : 0,
+    };
+  });
+}
+
+function portalTrendFallback(subject: string): PortalData["scoreTrend"] {
+  if (subject === "语文") {
+    return [{ label: "阅读", score: 78 }, { label: "习作", score: 82 }, { label: "单元", score: 84 }];
+  }
+  if (subject === "英语") {
+    return [{ label: "听写", score: 80 }, { label: "阅读", score: 83 }, { label: "单元", score: 86 }];
+  }
+  return [{ label: "单元测验", score: 76 }, { label: "月考", score: 81 }, { label: "期中", score: 85 }];
+}
+
+function normalizePortalSubjectTrends(points: PortalData["scoreTrend"]) {
+  return portalSubjectOrder.map((subject) => {
+    const subjectPoints = points.filter((item) => item.label.includes(subject));
+    const trend = subjectPoints.length > 0 ? subjectPoints : subject === "数学" && points.length > 0 ? points : portalTrendFallback(subject);
+    const first = trend[0]?.score ?? 0;
+    const last = trend[trend.length - 1]?.score ?? first;
+    return {
+      subject,
+      trend,
+      latest: last,
+      delta: Math.round((last - first) * 10) / 10,
+    };
+  });
+}
+
+type KnowledgePoint = {
+  id: string;
+  schoolId?: string;
+  gradeId?: string;
+  subjectId?: string;
+  name: string;
+  subject: string;
+  parentId?: string;
+  code?: string;
+};
+
+type QuestionBankItem = {
+  id: string;
+  schoolId?: string;
+  gradeId?: string;
+  subjectId?: string;
+  subject: string;
+  questionType: string;
+  difficulty: string;
+  content: string;
+  answer: string;
+  analysis: string;
+  source: string;
+  status: string;
+  knowledge: KnowledgePoint[];
+  linkedMistakes: number;
+  createdAt?: string;
+};
+
+type QuestionBankResponse = {
+  items: QuestionBankItem[];
+  counts: Record<string, number>;
+};
+
+type KnowledgePointResponse = {
+  items: KnowledgePoint[];
+  counts: Record<string, number>;
+};
+
+type PaperComposition = {
+  id: string;
+  title: string;
+  schoolId?: string;
+  gradeId?: string;
+  gradeName?: string;
+  subjectId?: string;
+  subject: string;
+  mode: string;
+  status: string;
+  questionCount: number;
+  totalScore: number;
+  createdBy?: string;
+  questions?: Array<QuestionBankItem & { sortOrder: number; score: number }>;
+};
+
+type PaperCompositionResponse = {
+  items: PaperComposition[];
+  counts: Record<string, number>;
+};
+
+type AITaskRecord = {
+  id: string;
+  taskType: string;
+  status: string;
+  provider: string;
+  request?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  sourceObjectKey?: string;
+  sourceUrl?: string;
+  ownerType?: string;
+  ownerId?: string;
+  createdBy?: string;
+  message?: string;
+  errorMessage?: string;
+  createdAt?: string;
+};
+
+type AITaskResponse = {
+  items: AITaskRecord[];
+  counts: Record<string, number>;
+};
+
+type AIProviderPublicConfig = {
+  name?: string;
+  baseUrl?: string;
+  timeoutSeconds?: number;
+  apiKeyProvided?: boolean;
+  callbackSecretProvided?: boolean;
+  configured?: boolean;
 };
 
 type OrganizationGraph = {
   counts: Record<string, number>;
   schools: Array<{ id: string; name: string; type: string; children?: Array<{ id: string; name: string; type: string; children?: Array<{ id: string; name: string; type: string }> }> }>;
+  grades?: OrganizationListItem[];
+  classes?: OrganizationListItem[];
+  subjects?: OrganizationListItem[];
+  classSubjects?: OrganizationListItem[];
+  teachers?: OrganizationListItem[];
+  students?: OrganizationListItem[];
+  certifications?: GuardianCertification[];
+};
+
+type OrganizationListItem = {
+  id: string;
+  name: string;
+  schoolId?: string;
+  gradeId?: string;
+  classId?: string;
+  subjectId?: string;
+  teacherId?: string;
+  studentNo?: string;
+  mobile?: string;
+  relationship?: string;
+  gradeIds?: string[];
+  subjectIds?: string[];
+  meta?: string;
+};
+
+type GuardianCertification = {
+  id: string;
+  studentId: string;
+  studentName: string;
+  guardianId: string;
+  guardianName: string;
+  relationship: string;
+  status: string;
+  submittedAt: string;
 };
 
 type HomeworkWatch = {
@@ -374,12 +668,11 @@ type ScoreGenerationResponse = {
   generated: number;
 };
 
-type ActiveView = "workspace" | "organization" | "scan" | "templates" | "grading" | "mistakes" | "analytics";
+type ActiveView = "workspace" | "organization" | "scan" | "templates" | "questionBank" | "paperFlow" | "aiTasks" | "grading" | "mistakes" | "analytics";
 type Overlay = "filter" | "notifications" | null;
 type TemplateTool = "objective" | "subjective" | "choice" | "judge";
 type TemplateStatus = "draft" | "published" | "disabled";
 type RequestStatus = "loading" | "processing" | "success" | "error" | "empty";
-type ConnectionStatus = "checking" | "available" | "unavailable" | "skipped";
 type UserRole = "teacher" | "researcher" | "admin" | "student" | "guardian";
 type Permission =
   | "scan:create"
@@ -471,6 +764,20 @@ const templateStatusLabels: Record<TemplateStatus, string> = {
   disabled: "停用"
 };
 
+const scanTypeLabels: Record<ScanType, string> = {
+  paper: "试卷扫描",
+  answer_sheet: "答题卡扫描"
+};
+
+const scanTypeDescriptions: Record<ScanType, string> = {
+  paper: "导入空白试卷，后续由 AI 生成一一对应的答题卡。",
+  answer_sheet: "学生考完试后导入答题卡，绑定已生成答题卡进入自动阅卷。"
+};
+
+function scanTypeLabel(value?: string) {
+  return value === "paper" ? scanTypeLabels.paper : scanTypeLabels.answer_sheet;
+}
+
 const canvasPresets: CanvasSize[] = [
   { label: "A4 空白卷", width: 760, height: 1080 },
   { label: "答题卡", width: 760, height: 900 },
@@ -480,20 +787,20 @@ const canvasPresets: CanvasSize[] = [
 const roleConfig: Record<UserRole, { label: string; description: string; views: ActiveView[]; permissions: Permission[] }> = {
   teacher: {
     label: "教师",
-    description: "批阅、导入、模板和班级学情",
-    views: ["workspace", "scan", "templates", "grading", "mistakes", "analytics"],
+    description: "导入、生成答题卡、阅卷和学情",
+    views: ["workspace", "scan", "templates", "questionBank", "paperFlow", "aiTasks", "grading", "mistakes", "analytics"],
     permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
   },
   researcher: {
     label: "教研",
-    description: "模板、错题和学情分析",
-    views: ["workspace", "templates", "mistakes", "analytics"],
+    description: "答题卡、错题和学情分析",
+    views: ["workspace", "templates", "questionBank", "paperFlow", "aiTasks", "mistakes", "analytics"],
     permissions: ["template:edit", "template:ai", "mistake:generate"]
   },
   admin: {
     label: "管理员",
     description: "全部入口和维护操作",
-    views: ["workspace", "organization", "scan", "templates", "grading", "mistakes", "analytics"],
+    views: ["workspace", "organization", "scan", "templates", "questionBank", "paperFlow", "aiTasks", "grading", "mistakes", "analytics"],
     permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
   },
   student: {
@@ -514,7 +821,10 @@ const navItems = [
   { view: "workspace", label: "工作台", icon: LayoutDashboard },
   { view: "organization", label: "组织与用户", icon: UsersRound },
   { view: "scan", label: "扫描导入", icon: ScanLine },
-  { view: "templates", label: "试卷模板", icon: FileStack },
+  { view: "templates", label: "生成答题卡", icon: FileStack },
+  { view: "questionBank", label: "试题库", icon: BookOpenCheck },
+  { view: "paperFlow", label: "组卷阅卷", icon: ClipboardCheck },
+  { view: "aiTasks", label: "AI任务", icon: Sparkles },
   { view: "grading", label: "阅卷中心", icon: ClipboardCheck },
   { view: "mistakes", label: "错题集", icon: BookOpenCheck },
   { view: "analytics", label: "学情分析", icon: UsersRound }
@@ -568,13 +878,13 @@ const fallbackDashboard: DashboardData = {
     { label: "班级平均分", value: "81.6", delta: "较上次 +3.2", tone: "success" }
   ],
   scanQueue: [
-    { id: "scan_001", title: "六年级数学期中卷", className: "六年级 3 班", templateId: "tpl_001", templateVersion: 1, pages: 96, status: "OCR 识别中", progress: 68, retryCount: 0, queueStatus: "queued", files: [
+    { id: "scan_001", scanType: "answer_sheet", title: "六年级数学期中卷", className: "六年级 3 班", templateId: "tpl_001", templateVersion: 1, pages: 96, status: "OCR 识别中", progress: 68, retryCount: 0, queueStatus: "queued", files: [
       { key: "mock/scan_001/zhangsan.png", fileName: "张三-第1页.png", contentType: "image/png", size: 204800, url: "/mock/student-answer-q15.png", page: 1, status: "识别中", studentId: "stu_001", studentName: "张三", matchStatus: "matched", matchMethod: "name" }
     ] },
-    { id: "scan_002", title: "分数应用题专项", className: "六年级 1 班", templateId: "tpl_001", templateVersion: 1, pages: 42, status: "等待 OMR", progress: 32, retryCount: 0, queueStatus: "queued", files: [
+    { id: "scan_002", scanType: "answer_sheet", title: "分数应用题专项", className: "六年级 1 班", templateId: "tpl_001", templateVersion: 1, pages: 42, status: "等待 OMR", progress: 32, retryCount: 0, queueStatus: "queued", files: [
       { key: "mock/scan_002/unmatched.png", fileName: "未匹配-第1页.png", contentType: "image/png", size: 178200, url: "/mock/student-answer-q18.png", page: 1, status: "等待 OMR", matchStatus: "pending" }
     ] },
-    { id: "scan_003", title: "几何面积小测", className: "五年级 2 班", templateId: "tpl_001", templateVersion: 1, pages: 48, status: "待导入", progress: 0, failureReason: "OCR Worker 暂未消费", retryCount: 1, queueStatus: "failed", files: [
+    { id: "scan_003", scanType: "paper", title: "几何面积小测空白试卷", className: "五年级 2 班", pages: 48, status: "试卷已导入", progress: 100, failureReason: "", retryCount: 0, queueStatus: "queued", files: [
       { key: "mock/scan_003/error.png", fileName: "赵六-第1页.png", contentType: "image/png", size: 192000, url: "/mock/student-answer-q18.png", page: 1, status: "失败", failureReason: "识别超时", matchStatus: "pending" }
     ] }
   ],
@@ -994,6 +1304,7 @@ function RequestStateView({
   const icon = state.status === "loading" || state.status === "processing"
     ? <Loader2 size={18} />
     : <AlertCircle size={18} />;
+
   return (
     <div className={`request-state request-state-${state.status}${compact ? " compact" : ""}`} role={state.status === "error" ? "alert" : "status"}>
       <div className="request-state-copy">
@@ -1008,58 +1319,6 @@ function RequestStateView({
           <RefreshCw size={16} />重试
         </button>
       ) : null}
-    </div>
-  );
-}
-
-function apiStatusFromRequests(states: RequestState[]): ConnectionStatus {
-  if (states.some((state) => state.status === "error")) {
-    return "unavailable";
-  }
-  if (states.some((state) => state.status === "loading" || state.status === "processing")) {
-    return "checking";
-  }
-  return "available";
-}
-
-function connectionLabel(status: ConnectionStatus) {
-  const labels = {
-    checking: "检测中",
-    available: "可用",
-    unavailable: "不可用",
-    skipped: "已跳过"
-  } satisfies Record<ConnectionStatus, string>;
-  return labels[status];
-}
-
-function ConnectionStatusBar({
-  apiStatus,
-  databaseStatus = "skipped",
-  storageStatus = "skipped",
-  note
-}: {
-  apiStatus: ConnectionStatus;
-  databaseStatus?: ConnectionStatus;
-  storageStatus?: ConnectionStatus;
-  note: string;
-}) {
-  const items = [
-    { key: "api", icon: <Sparkles size={16} />, label: "Go API", status: apiStatus },
-    { key: "database", icon: <Database size={16} />, label: "数据库", status: databaseStatus },
-    { key: "storage", icon: <Cloud size={16} />, label: "对象存储", status: storageStatus }
-  ];
-  return (
-    <div className="connection-bar" role="status">
-      <div className="connection-items">
-        {items.map((item) => (
-          <span className={`connection-pill connection-${item.status}`} key={item.key}>
-            {item.icon}
-            {item.label}
-            <strong>{connectionLabel(item.status)}</strong>
-          </span>
-        ))}
-      </div>
-      <span className="connection-note">{note}</span>
     </div>
   );
 }
@@ -1174,41 +1433,132 @@ function loadStoredTemplateLibrary(): PaperTemplate[] {
   }
 }
 
-function PortalView({ role, onNotice }: { role: "student" | "guardian"; onNotice: (value: string) => void }) {
+function GuardianChildConfig({
+  children,
+  selectedStudentId,
+  onSelect,
+  onNotice
+}: {
+  children: GuardianChildLink[];
+  selectedStudentId: string;
+  onSelect: (studentId: string) => void;
+  onNotice: (value: string) => void;
+}) {
+  const [form, setForm] = useState({ token: "", relationship: "parent" });
+  const linkedChildren = children.length > 0 ? children : [
+    { studentId: "stu_001", studentName: "张三", gradeName: "六年级", className: "六年级 3 班" },
+    { studentId: "stu_002", studentName: "李四", gradeName: "六年级", className: "六年级 3 班" }
+  ];
+
+  async function submitChildLink() {
+    if (!form.token.trim()) {
+      onNotice("请输入孩子关联邀请码");
+      return;
+    }
+    try {
+      const response = await fetch("/api/guardian/certifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: form.token.trim(), guardianId: "guardian_001", relationship: form.relationship })
+      });
+      if (!response.ok) throw new Error("certification failed");
+      setForm({ token: "", relationship: "parent" });
+      onNotice("孩子关联申请已提交，审核通过后会出现在切换列表");
+    } catch {
+      onNotice("孩子关联申请提交失败，请检查邀请码是否有效");
+    }
+  }
+
+  return (
+    <section className="sidebar-child-config">
+      <div className="sidebar-child-config-head">
+        <span>孩子配置</span>
+        <small>{linkedChildren.length} 个已关联</small>
+      </div>
+      <div className="sidebar-child-list">
+        {linkedChildren.map((child) => {
+          const isActive = child.studentId === selectedStudentId;
+          return (
+            <button className={isActive ? "active" : ""} key={child.studentId} onClick={() => onSelect(child.studentId)} type="button">
+              <strong>{child.studentName}</strong>
+              <span>{child.gradeName ?? "六年级"} · {child.className ?? "六年级 3 班"}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="sidebar-child-link-form">
+        <input aria-label="孩子关联邀请码" placeholder="输入邀请码" value={form.token} onChange={(event: { target: { value: string } }) => setForm((current) => ({ ...current, token: event.target.value }))} />
+        <select aria-label="与孩子关系" value={form.relationship} onChange={(event: { target: { value: string } }) => setForm((current) => ({ ...current, relationship: event.target.value }))}>
+          <option value="parent">父母</option>
+          <option value="guardian">监护人</option>
+          <option value="relative">亲属</option>
+        </select>
+        <button type="button" onClick={() => void submitChildLink()}>提交关联</button>
+      </div>
+    </section>
+  );
+}
+
+function PortalView({
+  role,
+  onNotice,
+  selectedStudentId,
+  onGuardianChildrenChange,
+  onGuardianStudentChange
+}: {
+  role: "student" | "guardian";
+  onNotice: (value: string) => void;
+  selectedStudentId?: string;
+  onGuardianChildrenChange?: (children: GuardianChildLink[]) => void;
+  onGuardianStudentChange?: (studentId: string) => void;
+}) {
   const [data, setData] = useState<PortalData | null>(null);
-  const [children, setChildren] = useState<Array<{ studentId: string; studentName: string }>>([]);
   const [loading, setLoading] = useState(true);
 
   async function loadPortal(studentId = "") {
     setLoading(true);
     try {
+      const targetStudentId = role === "guardian" ? (studentId || selectedStudentId || "") : "";
       const path = role === "guardian"
-        ? `/api/portal/guardian?guardianId=guardian_001${studentId ? `&studentId=${studentId}` : ""}`
+        ? `/api/portal/guardian?guardianId=guardian_001${targetStudentId ? `&studentId=${targetStudentId}` : ""}`
         : "/api/portal/student?studentId=stu_001";
       const response = await fetch(path);
       if (!response.ok) throw new Error("portal unavailable");
-      const payload = await response.json() as PortalData | { children: Array<{ studentId: string; studentName: string }>; selected: PortalData };
+      const payload = await response.json() as PortalData | { children: GuardianChildLink[]; selected: PortalData };
       if ("selected" in payload) {
-        setChildren(payload.children);
+        onGuardianChildrenChange?.(payload.children);
+        onGuardianStudentChange?.(payload.selected.studentId);
         setData(payload.selected);
       } else {
         setData(payload);
       }
     } catch {
+      const fallbackChildren: GuardianChildLink[] = [
+        { studentId: "stu_001", studentName: "张三", gradeName: "六年级", className: "六年级 3 班" },
+        { studentId: "stu_002", studentName: "李四", gradeName: "六年级", className: "六年级 3 班" }
+      ];
+      const fallbackChild = fallbackChildren.find((child) => child.studentId === selectedStudentId) ?? fallbackChildren[0];
+      onGuardianChildrenChange?.(fallbackChildren);
+      onGuardianStudentChange?.(fallbackChild.studentId);
       setData({
-        studentId: "stu_001", studentName: "张三", gradeName: "六年级", className: "六年级 3 班",
-        scoreSummary: { highest: 96, lowest: 62, average: 81.6, personal: 85 },
-        homework: [{ id: "assign_001", title: "六年级数学期中卷", subject: "数学", status: "graded", dueAt: "2026-06-23 18:00" }, { id: "assign_002", title: "分数应用题专项", subject: "数学", status: "pending", dueAt: "2026-06-25 18:00" }],
-        scoreTrend: [{ label: "单元测验", score: 76 }, { label: "月考", score: 81 }, { label: "期中", score: 85 }],
+        studentId: fallbackChild.studentId, studentName: fallbackChild.studentName, gradeName: fallbackChild.gradeName ?? "六年级", className: fallbackChild.className ?? "六年级 3 班",
+        scoreSummary: { highest: 0, lowest: 0, average: 0, personal: fallbackChild.studentId === "stu_002" ? 78 : 85 },
+        homeworkSummary: fallbackChild.studentId === "stu_002" ? { total: 3, completed: 1, pending: 1, overdue: 1, completion: 33, needsAttention: 2 } : { total: 2, completed: 1, pending: 1, overdue: 0, completion: 50, needsAttention: 1 },
+        homework: fallbackChild.studentId === "stu_002"
+          ? [{ id: "assign_003", title: "语文阅读订正", subject: "语文", status: "pending", dueAt: "2026-07-03 18:00" }, { id: "assign_004", title: "英语短文表达", subject: "英语", status: "overdue", dueAt: "2026-07-01 18:00" }, { id: "assign_005", title: "数学比例专项", subject: "数学", status: "graded", dueAt: "2026-06-30 18:00" }]
+          : [{ id: "assign_001", title: "六年级数学期中卷", subject: "数学", status: "graded", dueAt: "2026-06-23 18:00" }, { id: "assign_002", title: "分数应用题专项", subject: "数学", status: "pending", dueAt: "2026-06-25 18:00" }],
+        scoreTrend: fallbackChild.studentId === "stu_002" ? [{ label: "单元测验", score: 82 }, { label: "月考", score: 79 }, { label: "期中", score: 78 }] : [{ label: "单元测验", score: 76 }, { label: "月考", score: 81 }, { label: "期中", score: 85 }],
         mistakes: [{ subject: "数学", paperCount: 3, homeworkCount: 0, items: [] }],
-        ai: [{ key: "analysis", name: "AI 学情分析", status: "planned", description: "多维分析学科与知识点短板，输出补漏地图" }, { key: "ladder", name: "天梯攻略", status: "planned", description: "根据补漏地图生成阶段练习册并周期复核" }]
+        weakPoints: fallbackChild.studentId === "stu_002" ? ["阅读概括", "英语时态", "比例"] : ["比例", "几何面积", "分数"],
+        ai: [{ key: "analysis", name: "AI 学情分析", status: "planned", description: "多维分析学科与知识点短板，输出补漏地图", cta: "登记分析意向", priceLabel: "后续付费" }, { key: "ladder", name: "天梯攻略", status: "planned", description: "根据补漏地图生成阶段练习册并周期复核", cta: "登记提升计划", priceLabel: "后续付费" }],
+        offers: [{ key: "analysis", name: "AI 学情深度分析", description: "把成绩、作业和错题整理成知识点短板与掌握程度。", cta: "预约开通", priceLabel: "即将开放" }, { key: "ladder", name: "天梯提升攻略", description: "围绕薄弱知识点生成阶段练习册，练完复核再规划。", cta: "登记购买意向", priceLabel: "即将开放" }]
       });
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => { void loadPortal(); }, [role]);
+  useEffect(() => { void loadPortal(selectedStudentId ?? ""); }, [role, selectedStudentId]);
 
   async function reserve(capability: string) {
     try {
@@ -1220,21 +1570,124 @@ function PortalView({ role, onNotice }: { role: "student" | "guardian"; onNotice
   }
 
   if (loading || !data) return <RequestStateView state={{ status: "loading", message: "正在加载个人学情" }} />;
+  const completedHomework = data.homework.filter((item) => isPortalHomeworkDone(item.status)).length;
+  const homeworkSummary = data.homeworkSummary ?? { total: data.homework.length, completed: completedHomework, pending: Math.max(0, data.homework.length - completedHomework), overdue: 0, completion: data.homework.length ? Math.round(completedHomework / data.homework.length * 100) : 0, needsAttention: Math.max(0, data.homework.length - completedHomework) };
+  const firstScore = data.scoreTrend[0]?.score ?? data.scoreSummary.personal;
+  const lastScore = data.scoreTrend[data.scoreTrend.length - 1]?.score ?? data.scoreSummary.personal;
+  const trendDelta = Math.round((lastScore - firstScore) * 10) / 10;
+  const subjectHomework = normalizePortalSubjectHomework(data.homework);
+  const subjectTrends = normalizePortalSubjectTrends(data.scoreTrend);
+  const subjectMistakes = normalizePortalSubjectMistakes(data.mistakes);
+  const weakPoints = data.weakPoints?.length ? data.weakPoints : subjectMistakes.flatMap((subject) => subject.items.map((item) => item.knowledgePoint)).filter(Boolean).slice(0, 5);
+  const pendingHomeworkCount = homeworkSummary.pending + homeworkSummary.overdue;
   return (
     <section className="portal-stack">
       <div className="portal-hero">
-        <div><p className="eyebrow">{role === "guardian" ? "家长学情视野" : "我的学习工作台"}</p><h2>{data.studentName}，{role === "guardian" ? "本周学习节奏稳定" : "继续保持上升趋势"}</h2><span>{data.gradeName} · {data.className}</span></div>
-        {role === "guardian" && children.length > 1 ? <label>查看孩子<select value={data.studentId} onChange={(event: { target: { value: string } }) => void loadPortal(event.target.value)}>{children.map((child) => <option key={child.studentId} value={child.studentId}>{child.studentName}</option>)}</select></label> : null}
+        <div><p className="eyebrow">{role === "guardian" ? "家长学情视野" : "我的学习工作台"}</p><h2>{data.studentName}，{role === "guardian" ? "本周学习重点已整理" : "继续保持上升趋势"}</h2><span>{data.gradeName} · {data.className} · {weakPoints.length ? `重点关注 ${weakPoints.slice(0, 2).join("、")}` : "暂无明显薄弱点"}</span></div>
       </div>
-      <div className="portal-score-grid">
-        {[{ label: "我的成绩", value: data.scoreSummary.personal }, { label: "年级/班级最高分", value: data.scoreSummary.highest }, { label: "最低分", value: data.scoreSummary.lowest }, { label: "平均分", value: data.scoreSummary.average }].map((item) => <article key={item.label}><span>{item.label}</span><strong>{item.value}</strong><small>{data.className}</small></article>)}
+      <section className="portal-study-summary">
+        <div><span>最近成绩</span><strong>{data.scoreSummary.personal} 分</strong></div>
+        <div><span>趋势</span><strong className={trendDelta >= 0 ? "trend-up" : "trend-down"}>{trendDelta >= 0 ? "+" : ""}{trendDelta} 分</strong></div>
+        <div><span>作业</span><strong>{pendingHomeworkCount > 0 ? `${pendingHomeworkCount} 项待处理` : "今日已清空"}</strong></div>
+        <div><span>优先关注</span><strong>{weakPoints.slice(0, 2).join("、") || "保持节奏"}</strong></div>
+      </section>
+      <div className="portal-comparison-grid">
+        <article className="panel portal-stat-card attention portal-risk-card">
+          <p className="eyebrow">Homework Risk</p>
+          <h3>{homeworkSummary.needsAttention > 0 ? `${homeworkSummary.needsAttention} 项需要关注` : "作业节奏正常"}</h3>
+          <div className="portal-risk-summary">
+            <span>已完成<strong>{homeworkSummary.completed}</strong></span>
+            <span>待处理<strong>{homeworkSummary.pending}</strong></span>
+            <span>逾期<strong>{homeworkSummary.overdue}</strong></span>
+          </div>
+          <div className="portal-risk-list">
+            {subjectHomework.map((subject) => (
+              <section key={subject.subject}>
+                <strong>{subject.subject}</strong>
+                <div className="portal-mini-progress"><span style={{ width: `${subject.completion}%` }} /></div>
+                <small>{subject.completion}% 完成 · {subject.pending + subject.overdue > 0 ? `优先处理 ${subject.homework.find((item) => !isPortalHomeworkDone(item.status))?.title ?? "待完成作业"}` : "保持当前节奏"}</small>
+              </section>
+            ))}
+          </div>
+          <small>{role === "guardian" ? "家长端优先显示需要陪伴和提醒的事项。" : "建议先完成待处理作业，再回到错题卡补齐订正。"}</small>
+        </article>
+        <article className="panel portal-stat-card portal-focus-card">
+          <p className="eyebrow">Personal Focus</p>
+          <h3>{weakPoints.length ? "个人薄弱点" : "暂无明显薄弱点"}</h3>
+          <div className="portal-focus-list">
+            {subjectMistakes.map((subject, index) => {
+              const focus = subject.items[0];
+              return (
+                <section key={subject.subject}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{subject.subject} · {focus?.knowledgePoint ?? "基础巩固"}</strong>
+                    <small>{focus?.wrongReason ?? "保持练习节奏，等待更多作业数据同步。"}</small>
+                  </div>
+                  <em>{subject.items.length} 题</em>
+                </section>
+              );
+            })}
+          </div>
+          <small>这里只展示本人错题和作业沉淀出的学习重点，不展示班级或其他同学统计。</small>
+        </article>
       </div>
       <div className="portal-two-column">
-        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Homework</p><h3>作业完成情况</h3></div><span>{data.homework.filter((item) => item.status !== "pending").length}/{data.homework.length} 已完成</span></div><div className="portal-list">{data.homework.map((item) => <div key={item.id}><span className={`status-dot ${item.status}`} /><div><strong>{item.title}</strong><small>{item.subject} · 截止 {item.dueAt || "未设置"}</small></div><em>{item.status === "pending" ? "待完成" : "已完成"}</em></div>)}</div></article>
-        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Score Trend</p><h3>成绩趋势</h3></div><strong className="trend-up">+{Math.max(0, data.scoreTrend[data.scoreTrend.length - 1].score - data.scoreTrend[0].score)} 分</strong></div><div className="trend-chart">{data.scoreTrend.map((point) => <div key={point.label}><span style={{ height: `${point.score}%` }} /><strong>{point.score}</strong><small>{point.label}</small></div>)}</div></article>
+        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Homework</p><h3>作业完成情况</h3></div><span>{subjectHomework.reduce((sum, item) => sum + item.completed, 0)}/{subjectHomework.reduce((sum, item) => sum + item.homework.length, 0)} 已完成</span></div><div className="portal-subject-homework-list">{subjectHomework.map((subject) => (
+          <section className="portal-subject-homework" key={subject.subject}>
+            <div>
+              <strong>{subject.subject}</strong>
+              <span>{subject.completion}% 完成 · 待处理 {subject.pending + subject.overdue}</span>
+            </div>
+            <div className="portal-mini-progress"><span style={{ width: `${subject.completion}%` }} /></div>
+            <div className="portal-homework-items">
+              {subject.homework.slice(0, 2).map((item) => <small key={item.id}><i className={`status-dot ${item.status}`} />{item.title} · {isPortalHomeworkDone(item.status) ? "已完成" : "待完成"}</small>)}
+            </div>
+          </section>
+        ))}</div></article>
+        <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Score Trend</p><h3>成绩趋势</h3></div><strong className={trendDelta >= 0 ? "trend-up" : "trend-down"}>{trendDelta >= 0 ? "+" : ""}{trendDelta} 分</strong></div><div className="portal-subject-trends">{subjectTrends.map((subject) => (
+          <section className="portal-subject-trend" key={subject.subject}>
+            <div>
+              <strong>{subject.subject}</strong>
+              <span className={subject.delta >= 0 ? "trend-up" : "trend-down"}>{subject.delta >= 0 ? "+" : ""}{subject.delta} 分</span>
+            </div>
+            <div className="trend-chart compact">
+              {subject.trend.map((point) => <div key={`${subject.subject}-${point.label}`}><span style={{ height: `${Math.max(8, Math.min(100, point.score))}%` }} /><strong>{point.score}</strong><small>{point.label.replace(subject.subject, "")}</small></div>)}
+            </div>
+          </section>
+        ))}</div></article>
       </div>
-      <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Mistake Book</p><h3>学科错题集</h3></div><button className="ghost-button" type="button">查看全部错题</button></div><div className="subject-mistake-grid">{data.mistakes.map((subject) => <div key={subject.subject}><BookOpenCheck size={22} /><strong>{subject.subject}</strong><span>往期试卷 {subject.paperCount} 题</span><span>作业 {subject.homeworkCount} 题</span></div>)}</div></article>
-      <div className="ai-product-grid">{data.ai.map((item, index) => <article className={index === 0 ? "ai-product primary" : "ai-product"} key={item.key}><div><Sparkles size={22} /><span>即将开放</span></div><h3>{item.name}</h3><p>{item.description}</p>{role === "guardian" ? <small>先看清短板，再决定是否购买个性化提升服务。</small> : <small>模型厂商接入后开放，不生成虚假分析。</small>}<button onClick={() => void reserve(item.key)} type="button">登记体验意向</button></article>)}</div>
+      <article className="panel portal-panel"><div className="panel-head"><div><p className="eyebrow">Mistake Book</p><h3>学科错题集</h3></div><div className="weak-point-row">{weakPoints.map((item) => <span key={item}>{item}</span>)}</div></div><div className="subject-mistake-grid">{subjectMistakes.map((subject) => {
+        const latest = subject.items[0];
+        return (
+          <div className="subject-mistake-card" key={subject.subject}>
+            <div className="subject-mistake-head">
+              <BookOpenCheck size={22} />
+              <div>
+                <strong>{subject.subject}</strong>
+                <span>{subject.paperCount + subject.homeworkCount} 个错题来源</span>
+              </div>
+            </div>
+            <div className="subject-mistake-counts">
+              <span>试卷<strong>{subject.paperCount}</strong></span>
+              <span>作业<strong>{subject.homeworkCount}</strong></span>
+              <span>待订正<strong>{subject.items.length}</strong></span>
+            </div>
+            {latest ? (
+              <div className="subject-mistake-focus">
+                <em>最近错题 · 第 {latest.questionNo || latest.id} 题</em>
+                <strong>{latest.knowledgePoint}</strong>
+                <p>{latest.wrongReason}</p>
+              </div>
+            ) : null}
+            <div className="subject-mistake-items">
+              {subject.items.slice(0, 2).map((item) => <small key={item.id}>#{item.questionNo || item.id} · {item.questionType} · {item.knowledgePoint}</small>)}
+            </div>
+          </div>
+        );
+      })}</div></article>
+      {role === "guardian" && data.offers?.length ? <article className="panel parent-conversion"><div><p className="eyebrow">Parent Decision</p><h3>从“看见问题”到“持续提升”</h3><span>基础学情免费展示；深度分析和天梯计划在第三方 AI 接入后开放购买。</span></div><div>{data.offers.map((offer) => <section key={offer.key}><strong>{offer.name}</strong><p>{offer.description}</p><small>{offer.priceLabel}</small><button onClick={() => void reserve(offer.key)} type="button">{offer.cta}</button></section>)}</div></article> : null}
+      <div className="ai-product-grid">{data.ai.map((item, index) => <article className={index === 0 ? "ai-product primary" : "ai-product"} key={item.key}><div><Sparkles size={22} /><span>{item.priceLabel || "即将开放"}</span></div><h3>{item.name}</h3><p>{item.description}</p>{role === "guardian" ? <small>先看清短板，再决定是否购买个性化提升服务。</small> : <small>模型厂商接入后开放，不生成虚假分析。</small>}<button onClick={() => void reserve(item.key)} type="button">{item.cta || "登记体验意向"}</button></article>)}</div>
     </section>
   );
 }
@@ -1242,20 +1695,567 @@ function PortalView({ role, onNotice }: { role: "student" | "guardian"; onNotice
 function OrganizationView({ onNotice }: { onNotice: (value: string) => void }) {
   const [graph, setGraph] = useState<OrganizationGraph | null>(null);
   const [kind, setKind] = useState("schools");
-  const [name, setName] = useState("");
+  const [entityForm, setEntityForm] = useState({ name: "", schoolId: "", gradeId: "", classId: "", subjectId: "", teacherId: "", studentNo: "", mobile: "", stage: "primary" });
+  const [inviteForm, setInviteForm] = useState({ teacherId: "", studentId: "", mobileHint: "" });
+  const [certForm, setCertForm] = useState({ token: "", guardianName: "", mobile: "", relationship: "parent" });
+  const schools = graph?.schools ?? [];
+  const grades = graph?.grades ?? [];
+  const classes = graph?.classes ?? [];
+  const subjects = graph?.subjects ?? [];
+  const classSubjects = graph?.classSubjects ?? [];
+  const teachers = graph?.teachers ?? [];
+  const students = graph?.students ?? [];
+  const certifications = graph?.certifications ?? [];
+  const selectedSchoolId = entityForm.schoolId || schools[0]?.id || "school_001";
+  const selectedGradeId = entityForm.gradeId || grades.find((item) => item.schoolId === selectedSchoolId)?.id || grades[0]?.id || "grade_6";
+  const selectedClassId = entityForm.classId || classes.find((item) => item.gradeId === selectedGradeId)?.id || classes[0]?.id || "class_603";
+  const selectedSubjectId = entityForm.subjectId || subjects.find((item) => item.schoolId === selectedSchoolId)?.id || subjects[0]?.id || "subject_math";
+  const selectedCourseTeacherId = entityForm.teacherId || teachers.find((item) => item.schoolId === selectedSchoolId)?.id || teachers[0]?.id || "";
+  const selectedTeacherId = inviteForm.teacherId || teachers[0]?.id || "teacher_001";
+  const selectedStudentId = inviteForm.studentId || students[0]?.id || "stu_001";
   async function load() { try { const response = await fetch("/api/organization/graph"); if (response.ok) setGraph(await response.json() as OrganizationGraph); } catch { setGraph(null); } }
   useEffect(() => { void load(); }, []);
   async function create() {
-    if (!name.trim()) { onNotice("请填写名称"); return; }
-    const schoolId = graph?.schools[0]?.id ?? "school_001";
-    const gradeId = graph?.schools[0]?.children?.[0]?.id ?? "grade_6";
-    const classId = graph?.schools[0]?.children?.[0]?.children?.[0]?.id ?? "class_603";
-    const payload = { name, schoolId, gradeId, classId, subjectId: "subject_math", stage: "primary" };
+    if (kind !== "class-subjects" && !entityForm.name.trim()) { onNotice("请填写名称"); return; }
+    const payload = {
+      name: kind === "class-subjects" ? "班级课程" : entityForm.name,
+      schoolId: selectedSchoolId,
+      gradeId: selectedGradeId,
+      classId: selectedClassId,
+      subjectId: selectedSubjectId,
+      teacherId: selectedCourseTeacherId,
+      studentNo: entityForm.studentNo,
+      mobile: entityForm.mobile,
+      stage: entityForm.stage,
+    };
     const response = await fetch(`/api/organization/${kind}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (!response.ok) { onNotice("创建失败，请检查数据库和关联信息"); return; }
-    setName(""); onNotice("组织数据已创建"); void load();
+    if (!response.ok) { onNotice("创建失败，请检查填写信息和关联关系"); return; }
+    setEntityForm((current) => ({ ...current, name: "", studentNo: "", mobile: "" })); onNotice(kind === "class-subjects" ? "班级课程关联已保存" : "组织数据已创建并完成关联"); void load();
   }
-  return <section className="organization-layout"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Organization Graph</p><h2>学校组织关系</h2></div><button className="ghost-button" onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button></div><div className="organization-counts">{Object.entries(graph?.counts ?? {}).map(([key, value]) => <div key={key}><strong>{value}</strong><span>{{ schools: "学校", grades: "年级", classes: "班级", teachers: "教师", students: "学生", subjects: "学科", pendingCertifications: "待认证" }[key] ?? key}</span></div>)}</div><div className="org-tree">{graph?.schools.map((school) => <div key={school.id}><strong>{school.name}</strong>{school.children?.map((grade) => <div key={grade.id}><span>{grade.name}</span>{grade.children?.map((item) => <small key={item.id}>{item.name}</small>)}</div>)}</div>) ?? <p>连接数据库后展示组织树。</p>}</div></article><aside className="panel org-create"><p className="eyebrow">Create & Link</p><h3>新增组织成员</h3><label>类型<select value={kind} onChange={(event: { target: { value: string } }) => setKind(event.target.value)}><option value="schools">学校</option><option value="grades">年级</option><option value="subjects">学科</option><option value="classes">班级</option><option value="teachers">教师</option><option value="students">学生</option></select></label><label>名称<input value={name} onChange={(event: { target: { value: string } }) => setName(event.target.value)} placeholder="请输入名称" /></label><button className="primary-button" onClick={() => void create()} type="button">创建并关联</button><div className="org-flow"><strong>家长访问门槛</strong><span>教师发邀请链接</span><span>家长提交认证</span><span>管理员审批通过</span><small>审批前不会写入学生—家长访问关系。</small></div></aside></section>;
+  async function createInvitation() {
+    if (!selectedTeacherId || !selectedStudentId) { onNotice("请选择教师和学生"); return; }
+    const response = await fetch("/api/guardian/invitations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ teacherId: selectedTeacherId, studentId: selectedStudentId, mobileHint: inviteForm.mobileHint }) });
+    if (!response.ok) { onNotice("邀请创建失败：教师需关联该学生所在年级"); return; }
+    const payload = await response.json() as { token: string; invitePath: string };
+    setCertForm((current) => ({ ...current, token: payload.token }));
+    onNotice(`邀请已创建：${payload.invitePath}`);
+  }
+  async function submitCertification() {
+    if (!certForm.token || !certForm.guardianName) { onNotice("请填写邀请 token 和家长姓名"); return; }
+    const response = await fetch("/api/guardian/certifications", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(certForm) });
+    if (!response.ok) { onNotice("认证申请提交失败，请检查邀请是否过期"); return; }
+    setCertForm({ token: "", guardianName: "", mobile: "", relationship: "parent" });
+    onNotice("认证申请已提交，等待管理员审核"); void load();
+  }
+  async function decideCertification(id: string, status: "approved" | "rejected") {
+    const response = await fetch(`/api/guardian/certifications/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, reviewerId: "user_admin_001", reviewNote: status === "approved" ? "信息匹配，允许访问" : "信息不匹配，暂不通过" }) });
+    if (!response.ok) { onNotice("审核操作失败"); return; }
+    onNotice(status === "approved" ? "已通过认证，家长可访问学生学情" : "已驳回认证申请"); void load();
+  }
+  return (
+    <section className="organization-stack">
+      <article className="panel">
+        <div className="panel-head">
+          <div><p className="eyebrow">Organization Graph</p><h2>学校组织关系</h2></div>
+          <button className="ghost-button" onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button>
+        </div>
+        <div className="organization-counts">{Object.entries(graph?.counts ?? {}).map(([key, value]) => <div key={key}><strong>{value}</strong><span>{{ schools: "学校", grades: "年级", classes: "班级", teachers: "教师", students: "学生", subjects: "学科", classSubjects: "班级课程", pendingCertifications: "待认证" }[key] ?? key}</span></div>)}</div>
+        <div className="org-tree">{graph?.schools.map((school) => <div key={school.id}><strong>{school.name}</strong>{school.children?.map((grade) => <div key={grade.id}><span>{grade.name}</span>{grade.children?.map((item) => <small key={item.id}>{item.name}</small>)}</div>)}</div>) ?? <p>暂无组织数据。</p>}</div>
+      </article>
+      <div className="organization-layout">
+        <article className="panel org-create">
+          <p className="eyebrow">Create & Link</p>
+          <h3>新增组织、教师、班级与学生</h3>
+          <div className="org-form-grid">
+            <label>类型<select value={kind} onChange={(event: { target: { value: string } }) => setKind(event.target.value)}><option value="schools">学校</option><option value="grades">年级</option><option value="subjects">学科</option><option value="classes">班级</option><option value="class-subjects">班级课程</option><option value="teachers">教师</option><option value="students">学生</option></select></label>
+            {kind !== "class-subjects" ? <label>名称<input value={entityForm.name} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入名称" /></label> : null}
+            {kind !== "schools" ? <label>学校<select value={selectedSchoolId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, schoolId: event.target.value }))}>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}</select></label> : null}
+            {["classes", "teachers", "class-subjects"].includes(kind) ? <label>年级<select value={selectedGradeId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, gradeId: event.target.value }))}>{grades.map((grade) => <option key={grade.id} value={grade.id}>{grade.name}</option>)}</select></label> : null}
+            {["students", "class-subjects"].includes(kind) ? <label>班级<select value={selectedClassId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, classId: event.target.value }))}>{classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
+            {["teachers", "class-subjects"].includes(kind) ? <label>学科<select value={selectedSubjectId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, subjectId: event.target.value }))}>{subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select></label> : null}
+            {kind === "class-subjects" ? <label>任课教师<select value={selectedCourseTeacherId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, teacherId: event.target.value }))}><option value="">暂不指定</option>{teachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.name} · {teacher.meta || "教师"}</option>)}</select></label> : null}
+            {kind === "teachers" ? <label>可选授课班级<select value={selectedClassId} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, classId: event.target.value }))}>{classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
+            {kind === "students" ? <label>学号<input value={entityForm.studentNo} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, studentNo: event.target.value }))} placeholder="例如 60304" /></label> : null}
+            {["teachers", "students"].includes(kind) ? <label>手机号<input value={entityForm.mobile} onChange={(event: { target: { value: string } }) => setEntityForm((current) => ({ ...current, mobile: event.target.value }))} placeholder="可选" /></label> : null}
+          </div>
+          <button className="primary-button" onClick={() => void create()} type="button">创建并关联</button>
+          {classSubjects.length > 0 ? <div className="course-link-list">{classSubjects.map((item) => <span key={item.id}>{item.name}{item.meta ? ` · ${item.meta}` : ""}</span>)}</div> : <p className="portal-empty">班级课程用于定义“某班开设哪些学科”，可选绑定任课教师。</p>}
+        </article>
+        <article className="panel org-create">
+          <p className="eyebrow">Guardian Access</p>
+          <h3>家长邀请与认证</h3>
+          <div className="org-form-grid">
+            <label>发起教师<select value={selectedTeacherId} onChange={(event: { target: { value: string } }) => setInviteForm((current) => ({ ...current, teacherId: event.target.value }))}>{teachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.name} · {teacher.meta}</option>)}</select></label>
+            <label>认证学生<select value={selectedStudentId} onChange={(event: { target: { value: string } }) => setInviteForm((current) => ({ ...current, studentId: event.target.value }))}>{students.map((student) => <option key={student.id} value={student.id}>{student.name} · {student.studentNo || "无学号"}</option>)}</select></label>
+            <label>手机号提示<input value={inviteForm.mobileHint} onChange={(event: { target: { value: string } }) => setInviteForm((current) => ({ ...current, mobileHint: event.target.value }))} placeholder="可选，用于核验" /></label>
+          </div>
+          <button className="ghost-button" onClick={() => void createInvitation()} type="button"><Send size={16} />生成注册邀请</button>
+          <div className="org-divider" />
+          <div className="org-form-grid">
+            <label>邀请 token<input value={certForm.token} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, token: event.target.value }))} placeholder="教师邀请生成后自动填入" /></label>
+            <label>家长姓名<input value={certForm.guardianName} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, guardianName: event.target.value }))} placeholder="家长真实姓名" /></label>
+            <label>家长手机号<input value={certForm.mobile} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, mobile: event.target.value }))} placeholder="用于后续登录" /></label>
+            <label>关系<select value={certForm.relationship} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, relationship: event.target.value }))}><option value="parent">父母</option><option value="guardian">监护人</option><option value="relative">亲属</option></select></label>
+          </div>
+          <button className="primary-button" onClick={() => void submitCertification()} type="button">提交家长认证申请</button>
+        </article>
+      </div>
+      <article className="panel">
+        <div className="panel-head"><div><p className="eyebrow">Certification Review</p><h3>待审核家长认证</h3></div><span>{certifications.length} 条待处理</span></div>
+        <div className="certification-list">
+          {certifications.length === 0 ? <p>暂无待审核认证。家长申请通过前不会写入学生—家长访问关系。</p> : certifications.map((item) => (
+            <div key={item.id}>
+              <div><strong>{item.guardianName}</strong><span>申请访问 {item.studentName} · {item.relationship}</span><small>{item.submittedAt}</small></div>
+              <div><button className="primary-button" onClick={() => void decideCertification(item.id, "approved")} type="button">通过</button><button className="ghost-button" onClick={() => void decideCertification(item.id, "rejected")} type="button">驳回</button></div>
+            </div>
+          ))}
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function QuestionBankView({ onNotice }: { onNotice: (value: string) => void }) {
+  const [questions, setQuestions] = useState<QuestionBankItem[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgePoint[]>([]);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState(true);
+  const [filters, setFilters] = useState({ search: "", knowledge: "", difficulty: "", type: "" });
+  const [knowledgeForm, setKnowledgeForm] = useState({ name: "", subject: "数学", gradeId: "grade_6", subjectId: "subject_math" });
+  const [questionForm, setQuestionForm] = useState({
+    content: "",
+    answer: "",
+    analysis: "",
+    subject: "数学",
+    gradeId: "grade_6",
+    subjectId: "subject_math",
+    questionType: "subjective",
+    difficulty: "medium",
+    source: "manual",
+    knowledgeText: ""
+  });
+  const selectedKnowledgeNames = questionForm.knowledgeText.split(/[，,\n]/).map((item) => item.trim()).filter(Boolean);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.search) params.set("search", filters.search);
+      if (filters.knowledge) params.set("knowledge", filters.knowledge);
+      if (filters.difficulty) params.set("difficulty", filters.difficulty);
+      if (filters.type) params.set("type", filters.type);
+      const [questionResponse, knowledgeResponse] = await Promise.all([
+        fetch(`/api/question-bank?${params.toString()}`),
+        fetch("/api/knowledge-points")
+      ]);
+      if (!questionResponse.ok || !knowledgeResponse.ok) throw new Error("question bank api unavailable");
+      const questionPayload = await questionResponse.json() as QuestionBankResponse;
+      const knowledgePayload = await knowledgeResponse.json() as KnowledgePointResponse;
+      setQuestions(questionPayload.items);
+      setCounts(questionPayload.counts);
+      setKnowledge(knowledgePayload.items);
+    } catch {
+      setQuestions([
+        { id: "qb_local_001", subject: "数学", questionType: "single_choice", difficulty: "easy", content: "比较 3/5 和 4/7 的大小，选择正确答案。", answer: "A", analysis: "通分后比较。", source: "template_split", status: "active", linkedMistakes: 1, knowledge: [{ id: "kp_005", name: "分数", subject: "数学" }] },
+        { id: "qb_local_002", subject: "数学", questionType: "subjective", difficulty: "medium", content: "一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？", answer: "100 千克", analysis: "剩余为 2/5。", source: "manual", status: "active", linkedMistakes: 0, knowledge: [{ id: "kp_001", name: "分数应用题", subject: "数学" }] }
+      ]);
+      setKnowledge([{ id: "kp_001", name: "分数应用题", subject: "数学" }, { id: "kp_002", name: "几何面积", subject: "数学" }, { id: "kp_003", name: "比例换算", subject: "数学" }]);
+      setCounts({ questions: 2, knowledgePoints: 3, linkedMistakes: 1 });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function createKnowledgePoint() {
+    if (!knowledgeForm.name.trim()) { onNotice("请填写知识点名称"); return; }
+    const response = await fetch("/api/knowledge-points", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(knowledgeForm) });
+    if (!response.ok) { onNotice("知识点创建失败"); return; }
+    setKnowledgeForm((current) => ({ ...current, name: "" }));
+    onNotice("知识点已创建");
+    void load();
+  }
+
+  async function createQuestion() {
+    if (!questionForm.content.trim()) { onNotice("请填写题干"); return; }
+    if (selectedKnowledgeNames.length === 0) { onNotice("请至少填写一个知识点标签"); return; }
+    const response = await fetch("/api/question-bank", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: questionForm.content,
+        answer: questionForm.answer,
+        analysis: questionForm.analysis,
+        subject: questionForm.subject,
+        gradeId: questionForm.gradeId,
+        subjectId: questionForm.subjectId,
+        questionType: questionForm.questionType,
+        difficulty: questionForm.difficulty,
+        source: questionForm.source,
+        createdBy: "teacher_001",
+        knowledgePoints: selectedKnowledgeNames
+      })
+    });
+    if (!response.ok) { onNotice("试题创建失败，请检查知识点是否重复"); return; }
+    setQuestionForm((current) => ({ ...current, content: "", answer: "", analysis: "", knowledgeText: "" }));
+    onNotice("试题已进入题库并完成知识点关联");
+    void load();
+  }
+
+  return (
+    <section className="question-bank-stack">
+      <article className="panel">
+        <div className="panel-head">
+          <div><p className="eyebrow">Question Bank</p><h2>试题库与知识点标签</h2></div>
+          <button className="ghost-button" onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button>
+        </div>
+        <div className="question-bank-counts">
+          <div><strong>{counts.questions ?? questions.length}</strong><span>试题</span></div>
+          <div><strong>{counts.knowledgePoints ?? knowledge.length}</strong><span>知识点</span></div>
+          <div><strong>{counts.linkedMistakes ?? 0}</strong><span>错题关联</span></div>
+        </div>
+        <div className="question-bank-filters">
+          <input onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, search: event.target.value }))} placeholder="搜索题干、答案、解析" value={filters.search} />
+          <select onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, knowledge: event.target.value }))} value={filters.knowledge}>
+            <option value="">全部知识点</option>{knowledge.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <select onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, type: event.target.value }))} value={filters.type}><option value="">全部题型</option><option value="single_choice">单选题</option><option value="fill_blank">填空题</option><option value="subjective">主观题</option></select>
+          <select onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, difficulty: event.target.value }))} value={filters.difficulty}><option value="">全部难度</option><option value="easy">基础</option><option value="medium">中等</option><option value="hard">提高</option></select>
+          <button className="primary-button" onClick={() => void load()} type="button">应用筛选</button>
+        </div>
+      </article>
+
+      <div className="question-bank-layout">
+        <article className="panel question-editor">
+          <p className="eyebrow">Create Question</p>
+          <h3>新增试题</h3>
+          <div className="question-form-grid">
+            <label>题型<select value={questionForm.questionType} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, questionType: event.target.value }))}><option value="single_choice">单选题</option><option value="fill_blank">填空题</option><option value="subjective">主观题</option></select></label>
+            <label>难度<select value={questionForm.difficulty} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, difficulty: event.target.value }))}><option value="easy">基础</option><option value="medium">中等</option><option value="hard">提高</option></select></label>
+            <label>学科<input value={questionForm.subject} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, subject: event.target.value }))} /></label>
+            <label>来源<select value={questionForm.source} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, source: event.target.value }))}><option value="manual">人工录入</option><option value="template_split">试卷拆解</option><option value="third_party">第三方导入</option></select></label>
+          </div>
+          <label>题干<textarea rows={4} value={questionForm.content} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, content: event.target.value }))} placeholder="录入完整题干，选择题可直接写选项" /></label>
+          <label>标准答案<textarea rows={2} value={questionForm.answer} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, answer: event.target.value }))} /></label>
+          <label>解析<textarea rows={2} value={questionForm.analysis} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, analysis: event.target.value }))} /></label>
+          <label>知识点标签<textarea rows={2} value={questionForm.knowledgeText} onChange={(event: { target: { value: string } }) => setQuestionForm((current) => ({ ...current, knowledgeText: event.target.value }))} placeholder="多个知识点用逗号隔开，例如：分数应用题，比例" /></label>
+          <button className="primary-button" onClick={() => void createQuestion()} type="button">保存试题并关联知识点</button>
+        </article>
+
+        <article className="panel question-editor">
+          <p className="eyebrow">Knowledge Tags</p>
+          <h3>知识点维护</h3>
+          <div className="question-form-grid">
+            <label>名称<input value={knowledgeForm.name} onChange={(event: { target: { value: string } }) => setKnowledgeForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如：圆柱体积" /></label>
+            <label>学科<input value={knowledgeForm.subject} onChange={(event: { target: { value: string } }) => setKnowledgeForm((current) => ({ ...current, subject: event.target.value }))} /></label>
+          </div>
+          <button className="ghost-button" onClick={() => void createKnowledgePoint()} type="button">新增知识点</button>
+          <div className="knowledge-tag-list">{knowledge.map((item) => <span key={item.id}>{item.subject} · {item.name}</span>)}</div>
+        </article>
+      </div>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="eyebrow">Question List</p><h3>题库列表</h3></div>{loading ? <Loader2 className="spin" size={18} /> : <span>{questions.length} 条</span>}</div>
+        <div className="question-list">
+          {questions.map((item) => (
+            <div key={item.id}>
+              <div><strong>{item.content}</strong><p>{item.analysis || "暂无解析"}</p><small>答案：{item.answer || "未配置"} · 来源：{item.source}</small></div>
+              <div className="question-meta"><span>{item.subject}</span><span>{item.questionType}</span><span>{item.difficulty}</span><span>关联错题 {item.linkedMistakes}</span>{item.knowledge.map((kp) => <em key={kp.id}>{kp.name}</em>)}</div>
+            </div>
+          ))}
+          {questions.length === 0 ? <p className="portal-empty">暂无试题，请先创建题目并至少绑定一个知识点。</p> : null}
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function PaperFlowView({ onNotice }: { onNotice: (value: string) => void }) {
+  const [questions, setQuestions] = useState<QuestionBankItem[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgePoint[]>([]);
+  const [papers, setPapers] = useState<PaperComposition[]>([]);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [filters, setFilters] = useState({ knowledge: "", difficulty: "", search: "" });
+  const [paperTitle, setPaperTitle] = useState("分数与比例专项练习");
+  const [blankFiles, setBlankFiles] = useState<File[]>([]);
+  const [answerFiles, setAnswerFiles] = useState<File[]>([]);
+  const [studentName, setStudentName] = useState("张三");
+
+  async function load() {
+    const params = new URLSearchParams();
+    if (filters.knowledge) params.set("knowledge", filters.knowledge);
+    if (filters.difficulty) params.set("difficulty", filters.difficulty);
+    if (filters.search) params.set("search", filters.search);
+    try {
+      const [questionResponse, knowledgeResponse, paperResponse] = await Promise.all([
+        fetch(`/api/question-bank?${params.toString()}`),
+        fetch("/api/knowledge-points"),
+        fetch("/api/paper-compositions")
+      ]);
+      if (!questionResponse.ok || !knowledgeResponse.ok || !paperResponse.ok) throw new Error("paper flow api unavailable");
+      const questionPayload = await questionResponse.json() as QuestionBankResponse;
+      const knowledgePayload = await knowledgeResponse.json() as KnowledgePointResponse;
+      const paperPayload = await paperResponse.json() as PaperCompositionResponse;
+      setQuestions(questionPayload.items);
+      setKnowledge(knowledgePayload.items);
+      setPapers(paperPayload.items);
+      if (!selectedPaperId && paperPayload.items[0]) setSelectedPaperId(paperPayload.items[0].id);
+    } catch {
+      const fallbackQuestions = [
+        { id: "qb_local_001", subject: "数学", questionType: "single_choice", difficulty: "easy", content: "比较 3/5 和 4/7 的大小，选择正确答案。", answer: "A", analysis: "通分后比较。", source: "template_split", status: "active", linkedMistakes: 1, knowledge: [{ id: "kp_005", name: "分数", subject: "数学" }] },
+        { id: "qb_local_002", subject: "数学", questionType: "subjective", difficulty: "medium", content: "一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？", answer: "100 千克", analysis: "剩余为 2/5。", source: "manual", status: "active", linkedMistakes: 0, knowledge: [{ id: "kp_001", name: "分数应用题", subject: "数学" }] }
+      ];
+      setQuestions(fallbackQuestions);
+      setKnowledge([{ id: "kp_001", name: "分数应用题", subject: "数学" }, { id: "kp_005", name: "分数", subject: "数学" }]);
+      setPapers([{ id: "paper_demo", title: "分数与比例专项练习", subject: "数学", mode: "manual", status: "draft", questionCount: 2, totalScore: 10, questions: fallbackQuestions.map((item, index) => ({ ...item, sortOrder: index + 1, score: 5 })) }]);
+      setSelectedPaperId("paper_demo");
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  function toggleQuestion(id: string) {
+    setSelectedQuestionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  async function createPaper() {
+    if (!paperTitle.trim()) { onNotice("请填写试卷标题"); return; }
+    if (selectedQuestionIds.length === 0) { onNotice("请至少选择一道题"); return; }
+    const response = await fetch("/api/paper-compositions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: paperTitle, subject: "数学", gradeId: "grade_6", gradeName: "六年级", subjectId: "subject_math", createdBy: "teacher_001", questionIds: selectedQuestionIds })
+    });
+    if (!response.ok) { onNotice("组卷失败，请检查题库数据"); return; }
+    const paper = await response.json() as PaperComposition;
+    setSelectedPaperId(paper.id);
+    setSelectedQuestionIds([]);
+    onNotice("手动组卷已保存为草稿");
+    void load();
+  }
+
+  async function createAIComposeTask() {
+    const response = await fetch(`/api/paper-compositions/${encodeURIComponent(selectedPaperId || "new")}/ai-compose-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ createdBy: "teacher_001", knowledgePointIds: filters.knowledge ? [filters.knowledge] : [], difficulty: filters.difficulty, phase: "reserved" })
+    });
+    if (!response.ok) { onNotice("AI 组卷任务创建失败"); return; }
+    const task = await response.json() as AITaskRecord;
+    onNotice(`AI 自动组卷已预留：${task.id}`);
+  }
+
+  async function uploadFiles(path: string, files: File[], extra: Record<string, string>, successMessage: string) {
+    if (files.length === 0) { onNotice("请先选择文件"); return; }
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    Object.entries(extra).forEach(([key, value]) => form.append(key, value));
+    const response = await fetch(path, { method: "POST", body: form });
+    if (!response.ok) { onNotice("上传失败，请检查文件类型"); return; }
+    onNotice(successMessage);
+  }
+
+  async function createGradingTask(mode: "standard_answer" | "ai") {
+    if (!selectedPaperId) { onNotice("请先选择试卷草稿"); return; }
+    const response = await fetch("/api/grading/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ compositionId: selectedPaperId, mode, createdBy: "teacher_001", phase: "reserved" })
+    });
+    if (!response.ok) { onNotice("批阅任务创建失败"); return; }
+    const task = await response.json() as AITaskRecord;
+    onNotice(`${mode === "ai" ? "AI 阅卷" : "标准答案比对"}任务已创建：${task.id}`);
+  }
+
+  const selectedPaper = papers.find((item) => item.id === selectedPaperId);
+  return (
+    <section className="paper-flow-stack">
+      <article className="panel">
+        <div className="panel-head"><div><p className="eyebrow">Paper Composition</p><h2>按知识点搜索题库并手动组卷</h2></div><button className="ghost-button" onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button></div>
+        <div className="paper-flow-filters">
+          <input value={filters.search} onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, search: event.target.value }))} placeholder="搜索题干、答案、解析" />
+          <select value={filters.knowledge} onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, knowledge: event.target.value }))}><option value="">全部知识点</option>{knowledge.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+          <select value={filters.difficulty} onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, difficulty: event.target.value }))}><option value="">全部难度</option><option value="easy">基础</option><option value="medium">中等</option><option value="hard">提高</option></select>
+          <button className="primary-button" onClick={() => void load()} type="button">搜索题库</button>
+        </div>
+      </article>
+
+      <div className="paper-flow-layout">
+        <article className="panel">
+          <div className="panel-head"><div><p className="eyebrow">Question Candidates</p><h3>候选试题</h3></div><span>已选 {selectedQuestionIds.length}</span></div>
+          <div className="paper-question-pick-list">{questions.map((item) => <button className={selectedQuestionIds.includes(item.id) ? "active" : ""} key={item.id} onClick={() => toggleQuestion(item.id)} type="button"><strong>{item.content}</strong><small>{item.questionType} · {item.difficulty} · {item.knowledge.map((kp) => kp.name).join("、")}</small></button>)}</div>
+        </article>
+        <article className="panel paper-compose-card">
+          <p className="eyebrow">Draft Paper</p>
+          <h3>生成试卷草稿</h3>
+          <label>标题<input value={paperTitle} onChange={(event: { target: { value: string } }) => setPaperTitle(event.target.value)} /></label>
+          <button className="primary-button" onClick={() => void createPaper()} type="button">保存手动组卷</button>
+          <button className="ghost-button" onClick={() => void createAIComposeTask()} type="button"><Sparkles size={16} />预留 AI 自动组卷</button>
+          <div className="paper-current">{selectedPaper ? <><strong>{selectedPaper.title}</strong><span>{selectedPaper.questionCount} 题 · {selectedPaper.totalScore} 分 · {selectedPaper.status}</span></> : <span>暂无试卷草稿</span>}</div>
+        </article>
+      </div>
+
+      <div className="paper-flow-layout">
+        <article className="panel paper-compose-card">
+          <p className="eyebrow">Blank Paper Analysis</p>
+          <h3>上传空白试卷</h3>
+          <p>上传后只创建“第三方 AI 生成答题卡”预留任务，当前不调用模型。</p>
+          <input multiple onChange={(event: { target: { files: FileList | null } }) => setBlankFiles(Array.from(event.target.files ?? []))} type="file" />
+          <button className="primary-button" onClick={() => void uploadFiles("/api/paper-analysis/blank-paper-uploads", blankFiles, { compositionId: selectedPaperId, createdBy: "teacher_001" }, "空白试卷已上传，AI 生成答题卡任务已预留")} type="button">上传空白卷</button>
+        </article>
+        <article className="panel paper-compose-card">
+          <p className="eyebrow">Answer Sheet Upload</p>
+          <h3>上传学生答题卡</h3>
+          <label>学生姓名<input value={studentName} onChange={(event: { target: { value: string } }) => setStudentName(event.target.value)} /></label>
+          <input multiple onChange={(event: { target: { files: FileList | null } }) => setAnswerFiles(Array.from(event.target.files ?? []))} type="file" />
+          <button className="primary-button" onClick={() => void uploadFiles("/api/answer-sheets/uploads", answerFiles, { compositionId: selectedPaperId, studentName, createdBy: "teacher_001" }, "学生答题卡已上传并记录")} type="button">上传答题卡</button>
+        </article>
+      </div>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="eyebrow">Grading Task</p><h3>批阅任务预留</h3></div><span>当前阶段不执行真实 AI 阅卷</span></div>
+        <div className="paper-grading-actions"><button className="ghost-button" onClick={() => void createGradingTask("standard_answer")} type="button">创建标准答案比对任务</button><button className="primary-button" onClick={() => void createGradingTask("ai")} type="button">预留 AI 自动阅卷任务</button></div>
+      </article>
+    </section>
+  );
+}
+
+function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
+  const [tasks, setTasks] = useState<AITaskRecord[]>([]);
+  const [provider, setProvider] = useState<AIProviderPublicConfig>({});
+  const [filters, setFilters] = useState({ status: "", taskType: "" });
+  const [loading, setLoading] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    const params = new URLSearchParams();
+    if (filters.status) params.set("status", filters.status);
+    if (filters.taskType) params.set("taskType", filters.taskType);
+    try {
+      const [taskResponse, healthResponse] = await Promise.all([
+        fetch(`/api/ai/tasks?${params.toString()}`),
+        fetch("/health")
+      ]);
+      if (!taskResponse.ok) throw new Error("ai task api unavailable");
+      const payload = await taskResponse.json() as AITaskResponse;
+      setTasks(payload.items);
+      if (healthResponse.ok) {
+        const health = await healthResponse.json() as { config?: { aiProvider?: AIProviderPublicConfig } };
+        setProvider(health.config?.aiProvider ?? {});
+      }
+    } catch {
+      setTasks([]);
+      onNotice("AI 任务暂时无法加载，请稍后重试");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function dispatchTask(taskID: string) {
+    const response = await fetch(`/api/ai/tasks/${encodeURIComponent(taskID)}/dispatch`, { method: "POST" });
+    const task = await response.json() as AITaskRecord;
+    if (!response.ok && response.status !== 409) {
+      onNotice(task.message || task.errorMessage || "AI 任务派发失败");
+      return;
+    }
+    setTasks((current) => current.map((item) => item.id === task.id ? task : item));
+    onNotice(response.status === 409 ? "AI Provider 配置未完成，任务已标记为 config_required" : `AI 任务已派发：${task.id}`);
+  }
+
+  const statusCounts = tasks.reduce<Record<string, number>>((acc, item) => {
+    acc[item.status] = (acc[item.status] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <section className="ai-task-stack">
+      <article className="panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">Third-party AI Provider</p>
+            <h2>AI 任务调度</h2>
+          </div>
+          <button className="ghost-button" disabled={loading} onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button>
+        </div>
+        <div className="ai-provider-card">
+          <div>
+            <span>Provider</span>
+            <strong>{provider.name || "generic-http"}</strong>
+          </div>
+          <div>
+            <span>配置状态</span>
+            <strong>{provider.configured ? "可派发" : "缺少 baseUrl 或 apiKey"}</strong>
+          </div>
+          <div>
+            <span>超时</span>
+            <strong>{provider.timeoutSeconds ?? 30}s</strong>
+          </div>
+          <div>
+            <span>回调密钥</span>
+            <strong>{provider.callbackSecretProvided ? "已配置" : "未配置"}</strong>
+          </div>
+        </div>
+        <p className="portal-empty">当前实现为通用 HTTP 适配层：派发时向配置的三方 `baseUrl` 发送任务 JSON，模型结果通过回调写回。</p>
+        <div className="ai-task-filters">
+          <select value={filters.status} onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">全部状态</option>
+            <option value="pending">待派发</option>
+            <option value="config_required">配置缺失</option>
+            <option value="processing">处理中</option>
+            <option value="succeeded">已完成</option>
+            <option value="failed">失败</option>
+          </select>
+          <input value={filters.taskType} onChange={(event: { target: { value: string } }) => setFilters((current) => ({ ...current, taskType: event.target.value }))} placeholder="按 taskType 过滤，如 ai_grading" />
+          <button className="primary-button" onClick={() => void load()} type="button">应用筛选</button>
+        </div>
+      </article>
+
+      <div className="question-bank-counts">
+        <div><strong>{tasks.length}</strong><span>当前列表</span></div>
+        <div><strong>{statusCounts.pending ?? 0}</strong><span>待派发</span></div>
+        <div><strong>{(statusCounts.processing ?? 0) + (statusCounts.config_required ?? 0)}</strong><span>处理中/待配置</span></div>
+      </div>
+
+      <article className="panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">AI Task Queue</p>
+            <h3>任务列表</h3>
+          </div>
+          <span>{loading ? "加载中" : `${tasks.length} 条`}</span>
+        </div>
+        <div className="ai-task-list">
+          {tasks.map((task) => (
+            <div key={task.id}>
+              <div className="ai-task-head">
+                <div>
+                  <strong>{task.taskType}</strong>
+                  <small>{task.id} · {task.provider || "third_party_reserved"}</small>
+                </div>
+                <span className={`status-pill ${task.status === "succeeded" || task.status === "completed" ? "published" : task.status === "failed" || task.status === "config_required" ? "disabled" : "draft"}`}>{task.status === "completed" ? "succeeded" : task.status}</span>
+              </div>
+              <p>{task.message || task.errorMessage || "等待处理"}</p>
+              <div className="question-meta">
+                {task.ownerType ? <span>{task.ownerType}:{task.ownerId}</span> : null}
+                {task.createdBy ? <span>createdBy {task.createdBy}</span> : null}
+                {task.createdAt ? <em>{task.createdAt}</em> : null}
+              </div>
+              <details>
+                <summary>查看请求/结果</summary>
+                <pre>{JSON.stringify({ request: task.request ?? {}, result: task.result ?? {} }, null, 2)}</pre>
+              </details>
+              <button className="primary-button" disabled={task.status === "processing" || task.status === "succeeded" || task.status === "completed"} onClick={() => void dispatchTask(task.id)} type="button"><Sparkles size={16} />派发到三方 AI</button>
+            </div>
+          ))}
+          {tasks.length === 0 ? <p className="portal-empty">暂无 AI 任务。可在“组卷阅卷”页面创建 AI 组卷/阅卷任务，或在学生/家长端触发学情分析预约。</p> : null}
+        </div>
+      </article>
+    </section>
+  );
 }
 
 function App() {
@@ -1265,7 +2265,7 @@ function App() {
   const [analytics, setAnalytics] = useState<ClassroomAnalytics>(fallbackAnalytics);
   const [dashboardState, setDashboardState] = useState<RequestState>({ status: "loading", message: "正在加载工作台数据" });
   const [subjectiveState, setSubjectiveState] = useState<RequestState>({ status: "loading", message: "正在连接阅卷队列" });
-  const [templatesState, setTemplatesState] = useState<RequestState>({ status: "loading", message: "正在加载模版库" });
+  const [templatesState, setTemplatesState] = useState<RequestState>({ status: "loading", message: "正在加载答题卡库" });
   const [analyticsState, setAnalyticsState] = useState<RequestState>({ status: "loading", message: "正在加载学情数据" });
   const [selectedTemplateId, setSelectedTemplateId] = useState(fallbackTemplates[0].id);
   const [selectedReviewId, setSelectedReviewId] = useState(fallbackSubjective.reviewId);
@@ -1274,6 +2274,7 @@ function App() {
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [notice, setNotice] = useState("已连接本地开发环境");
   const [scanTitle, setScanTitle] = useState("六年级数学期中卷");
+  const [scanType, setScanType] = useState<ScanType>("paper");
   const [scanClassName, setScanClassName] = useState("六年级 3 班");
   const [scanPages, setScanPages] = useState(48);
   const [scanTemplateId, setScanTemplateId] = useState(fallbackTemplates[0].id);
@@ -1284,7 +2285,7 @@ function App() {
   const [templateSourceMode, setTemplateSourceMode] = useState<TemplateSourceMode>("library");
   const [paperSources, setPaperSources] = useState<TemplatePaperSource[]>(fallbackPaperSources);
   const [selectedPaperSourceId, setSelectedPaperSourceId] = useState("");
-  const [canvasTitle, setCanvasTitle] = useState("未命名试卷模板");
+  const [canvasTitle, setCanvasTitle] = useState("未命名答题卡");
   const [canvasSize, setCanvasSize] = useState<CanvasSize>(canvasPresets[1]);
   const [canvasZoom, setCanvasZoom] = useState(1);
   const [activeTool, setActiveTool] = useState<TemplateTool>("subjective");
@@ -1308,7 +2309,7 @@ function App() {
   const [scanPreviewFiles, setScanPreviewFiles] = useState<ScanUploadFile[]>([]);
   const [scanMatchNames, setScanMatchNames] = useState<Record<string, string>>({});
   const [aiSuggestedRegions, setAiSuggestedRegions] = useState<CanvasRegion[]>([]);
-  const [aiSuggestionState, setAiSuggestionState] = useState<RequestState>({ status: "empty", message: "暂无 AI 拆卷建议" });
+  const [aiSuggestionState, setAiSuggestionState] = useState<RequestState>({ status: "empty", message: "暂无 AI 答题卡建议" });
   const [reviewSearch, setReviewSearch] = useState("");
   const [reviewFilter, setReviewFilter] = useState("all");
   const [reviewSort, setReviewSort] = useState("confidence_desc");
@@ -1343,6 +2344,8 @@ function App() {
   const [mistakeKnowledgeFilter, setMistakeKnowledgeFilter] = useState("all");
   const [learningProfile, setLearningProfile] = useState<LearningProfile>(fallbackLearningProfile);
   const [guardianReport, setGuardianReport] = useState<GuardianReport>(fallbackGuardianReport);
+  const [guardianChildren, setGuardianChildren] = useState<GuardianChildLink[]>([]);
+  const [selectedGuardianStudentId, setSelectedGuardianStudentId] = useState("stu_001");
 
   const publishedTemplates = useMemo(
     () => templates.filter((template) => normalizeTemplateStatus(template.status) === "published"),
@@ -1405,6 +2408,8 @@ function App() {
   );
 
   const can = (permission: Permission) => activeRole.permissions.includes(permission);
+  const isPortalRole = currentRole === "student" || currentRole === "guardian";
+  const canManageAnalytics = can("grading:decide") || can("guardian:remind");
 
   useEffect(() => {
     if (!activeRole.permissions.includes("scan:create") || (activeView !== "workspace" && activeView !== "scan")) {
@@ -1420,7 +2425,7 @@ function App() {
   const filteredScanQueue = useMemo(() => {
     const rows = dashboard.scanQueue
       .filter((job) => scanFilter === "all" || job.status.includes(scanFilter))
-      .filter((job) => includesSearch(`${job.title} ${job.className} ${job.status}`, scanSearch));
+      .filter((job) => includesSearch(`${job.title} ${job.className} ${scanTypeLabel(job.scanType)} ${job.status}`, scanSearch));
     return [...rows].sort((a, b) => {
       if (scanSort === "progress_asc") {
         return a.progress - b.progress;
@@ -1557,58 +2562,14 @@ function App() {
 
   const pagedMistakes = pageItems(filteredMistakes, mistakePage);
 
-  const activeConnection = useMemo(() => {
-    const requestStatesByView = {
-      workspace: [dashboardState, subjectiveState, analyticsState],
-      organization: [dashboardState],
-      scan: [dashboardState],
-      templates: [templatesState],
-      grading: [subjectiveState],
-      mistakes: [mistakesState, analyticsState],
-      analytics: [analyticsState]
-    } satisfies Record<ActiveView, RequestState[]>;
-    const apiStatus = apiStatusFromRequests(requestStatesByView[activeView]);
-    const notes = {
-      workspace: "数据库和对象存储连接检测暂时跳过；工作台优先展示 API 数据，失败时回退演示数据。",
-      organization: "组织关系、教师关联和家长认证均通过 Go API 持久化。",
-      scan: "扫描上传、任务创建和进度轮询优先走 Go API；API 不可用时保留当前页面数据。",
-      templates: "数据库连接检测暂时跳过；模板库优先读取 API，失败时回退本地模板。",
-      grading: "数据库连接检测暂时跳过；教师裁定保存失败时只保留本地状态提示。",
-      mistakes: "数据库连接检测暂时跳过；错题统计优先读取学情 API，失败时回退演示数据。",
-      analytics: "数据库连接检测暂时跳过；学情分析优先读取 API，失败时回退演示数据。"
-    } satisfies Record<ActiveView, string>;
-    const dashboardSourceNote = dashboard.source === "database"
-      ? "工作台正在展示 Go API 从数据库读取的实时数据。"
-      : dashboard.source === "fixtures"
-        ? "Go API 已响应，但数据库查询不可用；工作台展示后端演示数据。"
-        : "工作台 API 当前不可用，页面已使用本地演示数据兜底。";
-    const apiNote = apiStatus === "unavailable"
-      ? "API 当前不可用，页面已使用本地演示数据兜底。"
-      : apiStatus === "checking"
-        ? "正在检测当前页面 API 请求状态。"
-        : activeView === "workspace" || activeView === "scan"
-          ? dashboardSourceNote
-          : notes[activeView];
-    const databaseStatus = activeView === "workspace" || activeView === "scan"
-      ? dashboard.source === "database"
-        ? "available"
-        : dashboard.source === "fixtures"
-          ? "unavailable"
-          : "skipped"
-      : "skipped";
-    return {
-      apiStatus,
-      databaseStatus: databaseStatus as ConnectionStatus,
-      storageStatus: "skipped" as ConnectionStatus,
-      note: apiNote
-    };
-  }, [activeView, dashboard.source, dashboardState, subjectiveState, templatesState, analyticsState, mistakesState]);
-
   const viewCopy = {
     workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
     organization: { eyebrow: "Organization & Identity", title: "管理学校、教师、学生与家长认证" },
     scan: { eyebrow: "Scan Import", title: "导入扫描件并进入 OCR 队列" },
-    templates: { eyebrow: "Paper Templates", title: "试卷模版" },
+    templates: { eyebrow: "Answer Sheet Generator", title: "通过试卷生成答题卡" },
+    questionBank: { eyebrow: "Question Bank", title: "维护试题库与知识点标签" },
+    paperFlow: { eyebrow: "Paper Flow", title: "组卷、上传答题卡并创建批阅任务" },
+    aiTasks: { eyebrow: "AI Task Queue", title: "第三方 AI 任务调度与回调追踪" },
     grading: { eyebrow: "Grading Center", title: "主观题左右分屏批阅" },
     mistakes: { eyebrow: "Wrong Questions", title: "沉淀错题和薄弱知识点" },
     analytics: { eyebrow: "Class Analytics", title: "查看班级学情画像" }
@@ -1662,14 +2623,14 @@ function App() {
       return;
     }
     setSelectedTemplateId("");
-    setCanvasTitle("未命名试卷模板");
+    setCanvasTitle("未命名答题卡");
     setCanvasRegions([]);
     setSelectedRegionId("");
     setTemplateSourceMode("library");
     setCanvasSize(canvasPresets[1]);
     setCanvasZoom(1);
     openView("templates");
-    setNotice("已进入模板创建，可选择试卷来源并框选题区");
+    setNotice("已进入生成答题卡，可选择试卷来源并调用 AI 生成题区");
   }
 
   function openReviewQueue() {
@@ -1749,8 +2710,8 @@ function App() {
     if (!scanClassName.trim()) {
       return "请填写班级";
     }
-    if (!scanTemplateId) {
-      return "请选择已发布或可用模板";
+    if (scanType === "answer_sheet" && !scanTemplateId) {
+      return "请选择已生成并发布的答题卡";
     }
     if (!Number.isFinite(scanPages) || scanPages < 1) {
       return "页数必须大于 0";
@@ -1783,8 +2744,9 @@ function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: scanTitle.trim(),
+        scanType,
         className: scanClassName.trim(),
-        templateId: scanTemplateId,
+        templateId: scanType === "answer_sheet" ? scanTemplateId : "",
         templateVersion: template?.version ?? 1,
         pages: Number(scanPages),
         notes: scanNotes.trim(),
@@ -1837,13 +2799,14 @@ function App() {
         detail: "已在本地生成临时扫描任务，可稍后重试 API。"
       });
       setScanFileError("");
-      setNotice("扫描上传 API 不可用，已生成本地临时任务");
+      setNotice("已生成临时扫描任务");
       const nextJob: ScanJob = {
         id: `scan_local_${Date.now()}`,
+        scanType,
         title: scanTitle.trim() || "未命名扫描任务",
         className: scanClassName.trim() || "未选择班级",
-        templateId: scanTemplateId,
-        templateVersion: templates.find((item) => item.id === scanTemplateId)?.version ?? 1,
+        templateId: scanType === "answer_sheet" ? scanTemplateId : "",
+        templateVersion: scanType === "answer_sheet" ? templates.find((item) => item.id === scanTemplateId)?.version ?? 1 : 0,
         pages: Number(scanPages) || 1,
         notes: scanNotes.trim(),
         status: "待 OCR",
@@ -1864,6 +2827,9 @@ function App() {
   }
 
   function addPaperSourceFromScanJob(job: ScanJob) {
+    if ((job.scanType ?? "answer_sheet") !== "paper") {
+      return undefined;
+    }
     const nextSource: TemplatePaperSource = {
       id: `paper_local_${Date.now()}`,
       title: job.title,
@@ -1964,7 +2930,7 @@ function App() {
   }
 
   function buildCurrentTemplate(templateID: string): PaperTemplate {
-    const title = canvasTitle.trim() || "未命名试卷模版";
+    const title = canvasTitle.trim() || "未命名答题卡";
     const questions = canvasRegionsToQuestions(canvasRegions, templateID);
     return {
       id: templateID,
@@ -1983,52 +2949,52 @@ function App() {
 
   async function saveCurrentAsTemplate() {
     const localTemplate = buildCurrentTemplate(`tpl_local_${Date.now()}`);
-    setTemplatesState({ status: "processing", message: "正在保存模版", detail: "优先写入 Go API 模板库。" });
+    setTemplatesState({ status: "processing", message: "正在保存答题卡", detail: "优先写入 Go API 答题卡库。" });
     try {
       const savedTemplate = await writeTemplateToApi("/api/templates", "POST", localTemplate);
       const nextTemplates = [savedTemplate, ...templates.filter((item) => item.id !== savedTemplate.id)].slice(0, 12);
       persistTemplateLibrary(nextTemplates);
       setSelectedTemplateId(savedTemplate.id);
-      setTemplatesState({ status: "success", message: "模版已保存" });
-      setNotice(`${savedTemplate.name} 已保存到 API 模版库`);
+      setTemplatesState({ status: "success", message: "答题卡已保存" });
+      setNotice(`${savedTemplate.name} 已保存到 API 答题卡库`);
     } catch {
       persistTemplateLibrary([localTemplate, ...templates].slice(0, 12));
       setSelectedTemplateId(localTemplate.id);
       setTemplatesState({
         status: "error",
-        message: "模版保存 API 请求失败",
-        detail: "已保存到本地模版库，可稍后重试 API。"
+        message: "答题卡保存 API 请求失败",
+        detail: "已保存到本地答题卡库，可稍后重试 API。"
       });
-      setNotice(`${localTemplate.name} 已保存到本地模版库`);
+      setNotice(`${localTemplate.name} 已保存到本地答题卡库`);
     }
   }
 
   async function updateCurrentTemplate() {
     if (!selectedTemplateId) {
-      setNotice("请先选择要更新的模版");
+      setNotice("请先选择要更新的答题卡");
       return;
     }
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接编辑，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接编辑，请先复制新版本");
       return;
     }
     const localTemplate = buildCurrentTemplate(selectedTemplateId);
-    setTemplatesState({ status: "processing", message: "正在更新模版", detail: "优先写入 Go API 模板库。" });
+    setTemplatesState({ status: "processing", message: "正在更新答题卡", detail: "优先写入 Go API 答题卡库。" });
     try {
       const savedTemplate = await writeTemplateToApi(`/api/templates/${encodeURIComponent(selectedTemplateId)}`, "PUT", localTemplate);
       const nextTemplates = templates.map((item) => item.id === savedTemplate.id ? savedTemplate : item);
       persistTemplateLibrary(nextTemplates);
-      setTemplatesState({ status: "success", message: "模版已更新" });
-      setNotice(`${savedTemplate.name} 已更新到 API 模版库`);
+      setTemplatesState({ status: "success", message: "答题卡已更新" });
+      setNotice(`${savedTemplate.name} 已更新到 API 答题卡库`);
     } catch {
       const nextTemplates = templates.map((item) => item.id === selectedTemplateId ? localTemplate : item);
       persistTemplateLibrary(nextTemplates);
       setTemplatesState({
         status: "error",
-        message: "模版更新 API 请求失败",
-        detail: "已更新本地模版库，可稍后重试 API。"
+        message: "答题卡更新 API 请求失败",
+        detail: "已更新本地答题卡库，可稍后重试 API。"
       });
-      setNotice(`${localTemplate.name} 已更新到本地模版库`);
+      setNotice(`${localTemplate.name} 已更新到本地答题卡库`);
     }
   }
 
@@ -2038,12 +3004,12 @@ function App() {
     setCanvasTitle(template.name);
     setCanvasRegions(regions);
     setSelectedRegionId(regions[0]?.id ?? "");
-    setNotice(`已引用模版：${template.name}`);
+    setNotice(`已引用答题卡：${template.name}`);
   }
 
   async function deleteTemplateFromLibrary(templateID: string) {
     const nextTemplates = templates.filter((item) => item.id !== templateID);
-    setTemplatesState({ status: "processing", message: "正在删除模版", detail: "优先从 Go API 模板库删除。" });
+    setTemplatesState({ status: "processing", message: "正在删除答题卡", detail: "优先从 Go API 答题卡库删除。" });
     try {
       const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}`, { method: "DELETE" });
       if (!response.ok) {
@@ -2052,28 +3018,28 @@ function App() {
       persistTemplateLibrary(nextTemplates);
       setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
       setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
-      setTemplatesState(nextTemplates.length > 0 ? { status: "success", message: "模版已删除" } : { status: "empty", message: "暂无可用模版" });
-      setNotice("已从 API 模版库删除");
+      setTemplatesState(nextTemplates.length > 0 ? { status: "success", message: "答题卡已删除" } : { status: "empty", message: "暂无可用答题卡" });
+      setNotice("已从 API 答题卡库删除");
     } catch {
       persistTemplateLibrary(nextTemplates);
       setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
       setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
       setTemplatesState({
         status: "error",
-        message: "模版删除 API 请求失败",
-        detail: "已从本地模版库删除，可稍后同步 API。"
+        message: "答题卡删除 API 请求失败",
+        detail: "已从本地答题卡库删除，可稍后同步 API。"
       });
-      setNotice("已从本地模版库删除");
+      setNotice("已从本地答题卡库删除");
     }
   }
 
   async function copyTemplateFromLibrary(templateID: string) {
     const source = templates.find((item) => item.id === templateID);
     if (!source) {
-      setNotice("未找到可复制的模版");
+      setNotice("未找到可复制的答题卡");
       return;
     }
-    setTemplatesState({ status: "processing", message: "正在复制模版", detail: "优先调用 Go API 复制。" });
+    setTemplatesState({ status: "processing", message: "正在复制答题卡", detail: "优先调用 Go API 复制。" });
     try {
       const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}/copy`, { method: "POST" });
       if (!response.ok) {
@@ -2082,8 +3048,8 @@ function App() {
       const result = await response.json() as TemplateMutationResponse;
       persistTemplateLibrary([result.template, ...templates].slice(0, 12));
       setSelectedTemplateId(result.template.id);
-      setTemplatesState({ status: "success", message: "模版已复制" });
-      setNotice(`${result.template.name} 已复制到 API 模版库`);
+      setTemplatesState({ status: "success", message: "答题卡已复制" });
+      setNotice(`${result.template.name} 已复制到 API 答题卡库`);
     } catch {
       const copiedTemplate: PaperTemplate = {
         ...source,
@@ -2098,21 +3064,21 @@ function App() {
       setSelectedTemplateId(copiedTemplate.id);
       setTemplatesState({
         status: "error",
-        message: "模版复制 API 请求失败",
-        detail: "已复制到本地模版库，可稍后同步 API。"
+        message: "答题卡复制 API 请求失败",
+        detail: "已复制到本地答题卡库，可稍后同步 API。"
       });
-      setNotice(`${copiedTemplate.name} 已复制到本地模版库`);
+      setNotice(`${copiedTemplate.name} 已复制到本地答题卡库`);
     }
   }
 
   async function updateTemplateStatus(templateID: string, status: TemplateStatus) {
     const source = templates.find((item) => item.id === templateID);
     if (!source) {
-      setNotice("未找到要流转的模版");
+      setNotice("未找到要流转的答题卡");
       return;
     }
     const statusLabel = templateStatusLabels[status];
-    setTemplatesState({ status: "processing", message: `正在${statusLabel}模版`, detail: "优先写入 Go API 模板库状态。" });
+    setTemplatesState({ status: "processing", message: `正在${statusLabel}答题卡`, detail: "优先写入 Go API 答题卡库状态。" });
     try {
       const response = await fetch(`/api/templates/${encodeURIComponent(templateID)}/status`, {
         method: "PUT",
@@ -2125,7 +3091,7 @@ function App() {
       const result = await response.json() as TemplateMutationResponse;
       const nextTemplates = templates.map((item) => item.id === result.template.id ? result.template : item);
       persistTemplateLibrary(nextTemplates);
-      setTemplatesState({ status: "success", message: `模版已${statusLabel}` });
+      setTemplatesState({ status: "success", message: `答题卡已${statusLabel}` });
       setNotice(`${result.template.name} 已${statusLabel}`);
     } catch {
       const localTemplate = { ...source, status };
@@ -2133,8 +3099,8 @@ function App() {
       persistTemplateLibrary(nextTemplates);
       setTemplatesState({
         status: "error",
-        message: "模版状态 API 请求失败",
-        detail: "已更新本地模版库状态，可稍后同步 API。"
+        message: "答题卡状态 API 请求失败",
+        detail: "已更新本地答题卡库状态，可稍后同步 API。"
       });
       setNotice(`${source.name} 已在本地标记为${statusLabel}`);
     }
@@ -2142,7 +3108,7 @@ function App() {
 
   function saveTemplateDraft() {
     const now = new Date();
-    const title = canvasTitle.trim() || "未命名试卷模板";
+    const title = canvasTitle.trim() || "未命名答题卡";
     const draft: TemplateDraft = {
       id: `draft_${Date.now()}`,
       title,
@@ -2182,14 +3148,14 @@ function App() {
 
   async function generateTemplateAISuggestions() {
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模板不可直接写入 AI 建议，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接写入 AI 建议，请先复制新版本");
       return;
     }
     if (!selectedTemplateId) {
-      setNotice("请先保存或选择一个草稿模板，再生成 AI 拆卷建议");
+      setNotice("请先保存或选择一个草稿答题卡，再生成 AI 建议");
       return;
     }
-    setAiSuggestionState({ status: "processing", message: "正在生成 AI 拆卷建议", detail: "会识别题区、题型、题号并等待教师确认。" });
+    setAiSuggestionState({ status: "processing", message: "正在通过 AI 生成答题卡建议", detail: "会识别题区、题型、题号并等待教师确认。" });
     try {
       const response = await fetch(`/api/templates/${encodeURIComponent(selectedTemplateId)}/ai-suggestions`, {
         method: "POST",
@@ -2210,9 +3176,9 @@ function App() {
       setAiSuggestionState({
         status: "success",
         message: `AI 已建议 ${result.questionCount} 个题区`,
-        detail: `${result.source} · 总分 ${result.totalScore} · 请确认后写入模板库。`
+        detail: `${result.source} · 总分 ${result.totalScore} · 请确认后写入答题卡库。`
       });
-      setNotice("AI 拆卷建议已载入画布，确认后可写入模板库");
+      setNotice("AI 答题卡建议已载入画布，确认后可写入答题卡库");
     } catch {
       const fallback = regionsFromAIQuestions([
         { id: `ai_q_${Date.now()}_1`, no: "1", type: "single_choice", score: 2, standardAnswer: "A", scoringRules: ["选对 A 得 2 分"], knowledge: ["分数"], region: { page: 1, x: 120, y: 260, width: 480, height: 80 } },
@@ -2223,21 +3189,21 @@ function App() {
       setSelectedRegionId(fallback[0]?.id ?? "");
       setAiSuggestionState({
         status: "error",
-        message: "AI 拆卷 API 请求失败",
-        detail: "已载入本地建议，可确认后写入草稿模板。"
+        message: "AI 生成答题卡 API 请求失败",
+        detail: "已载入本地建议，可确认后写入草稿答题卡。"
       });
-      setNotice("AI 拆卷 API 不可用，已使用本地建议");
+      setNotice("已生成答题卡建议");
     }
   }
 
   async function confirmTemplateAISuggestions() {
     if (aiSuggestedRegions.length === 0) {
-      setNotice("请先生成 AI 拆卷建议");
+      setNotice("请先生成 AI 答题卡建议");
       return;
     }
     await saveCurrentRegions();
     setAiSuggestedRegions([]);
-    setAiSuggestionState({ status: "success", message: "AI 建议题区已写入模板库" });
+    setAiSuggestionState({ status: "success", message: "AI 答题卡建议已写入答题卡库" });
   }
 
   function sendGuardianReminders() {
@@ -2280,7 +3246,7 @@ function App() {
       setDashboardState({
         status: "error",
         message: "工作台 API 请求失败",
-        detail: "已展示本地演示数据，可重试连接 Go API。"
+        detail: "请稍后重试。"
       });
       return fallbackDashboard;
     }
@@ -2310,7 +3276,7 @@ function App() {
         setSubjectiveState({
           status: "error",
           message: "复核队列 API 请求失败",
-          detail: "已展示本地演示队列，可稍后重试。"
+          detail: "请稍后重试。"
         });
       }
       return fallbackDashboard.reviewQueue;
@@ -2366,7 +3332,7 @@ function App() {
       setScanPreviewTask(job);
       setScanPreviewFiles(files);
       setScanMatchNames(Object.fromEntries(files.map((file) => [file.key, file.studentName ?? ""])));
-      setNotice("扫描预览 API 不可用，已显示当前任务文件信息");
+      setNotice("已显示当前任务文件信息");
     }
   }
 
@@ -2411,7 +3377,7 @@ function App() {
         setScanPreviewFiles(nextJob.files ?? []);
       }
       setDashboardState({ status: "error", message: "扫描重试 API 请求失败", detail: "已在本地标记重试，可稍后同步 API。" });
-      setNotice("扫描重试 API 不可用，已本地记录重试");
+      setNotice("已记录重试");
     }
   }
 
@@ -2447,12 +3413,12 @@ function App() {
         ? { ...item, studentName, matchStatus: "matched", matchMethod: "manual" }
         : item);
       setScanPreviewFiles(nextFiles);
-      setNotice("学生匹配 API 不可用，已在本地更新预览状态");
+      setNotice("已更新预览状态");
     }
   }
 
   async function loadTemplates() {
-    setTemplatesState((current) => nextLoadingState(current, "正在加载模版库", "正在刷新模版库"));
+    setTemplatesState((current) => nextLoadingState(current, "正在加载答题卡库", "正在刷新答题卡库"));
     try {
       const response = await fetch("/api/templates");
       if (!response.ok) {
@@ -2467,16 +3433,16 @@ function App() {
         setSelectedTemplateId(data[0].id);
       }
       setTemplatesState(data.length > 0
-        ? { status: "success", message: "模版库已更新" }
-        : { status: "empty", message: "暂无可用模版", detail: "保存模板或重试接口后会显示在这里。" });
+        ? { status: "success", message: "答题卡库已更新" }
+        : { status: "empty", message: "暂无可用答题卡", detail: "保存答题卡或重试接口后会显示在这里。" });
       return data;
     } catch {
       const localTemplates = loadStoredTemplateLibrary();
       setTemplates(localTemplates);
       setTemplatesState({
         status: "error",
-        message: "模版库 API 请求失败",
-        detail: "已展示本地模版库，可重试连接 Go API。"
+        message: "答题卡库 API 请求失败",
+        detail: "已展示本地答题卡库，可重试连接 Go API。"
       });
       return localTemplates;
     }
@@ -2500,7 +3466,7 @@ function App() {
       setAnalyticsState({
         status: "error",
         message: "学情 API 请求失败",
-        detail: "已展示本地演示数据，可重试连接 Go API。"
+        detail: "请稍后重试。"
       });
       return fallbackAnalytics;
     }
@@ -2522,7 +3488,7 @@ function App() {
     } catch {
       setWrongQuestions(fallbackWrongQuestions);
       setSelectedMistake((current) => fallbackWrongQuestions.find((item) => item.id === current?.id) ?? fallbackWrongQuestions[0]);
-      setMistakesState({ status: "error", message: "错题 API 请求失败", detail: "已展示本地演示错题。" });
+      setMistakesState({ status: "error", message: "错题请求失败", detail: "请稍后重试。" });
       return fallbackWrongQuestions;
     }
   }
@@ -2551,7 +3517,7 @@ function App() {
       setNotice("已生成 " + studentName + " 的家长报告");
     } catch {
       setGuardianReport({ ...fallbackGuardianReport, studentName });
-      setNotice("家长报告 API 不可用，已展示演示报告");
+      setNotice("已展示家长报告");
     }
   }
 
@@ -2585,7 +3551,7 @@ function App() {
       setSelectedMistakeIds([]);
       setNotice("已生成再练任务，关联 " + data.linkedCount + " 道错题");
     } catch {
-      setNotice("再练任务创建失败，请检查 Go API 和数据库");
+      setNotice("再练任务创建失败，请稍后重试");
     }
   }
 
@@ -2608,7 +3574,7 @@ function App() {
       setAnalyticsState({
         status: "error",
         message: "成绩生成失败",
-        detail: "请确认 Go API 和数据库可用，或稍后重试。"
+        detail: "请稍后重试。"
       });
     }
   }
@@ -2679,7 +3645,7 @@ function App() {
 
   async function addRegionAt(event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) {
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接新增题区，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接新增题区，请先复制新版本");
       return;
     }
     const point = canvasPoint(event);
@@ -2731,7 +3697,7 @@ function App() {
 
   function updateSelectedRegion(updater: (region: CanvasRegion) => CanvasRegion) {
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接编辑，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接编辑，请先复制新版本");
       return;
     }
     setCanvasRegions((current) => current.map((item) => item.id === selectedRegionId ? updater(item) : item));
@@ -2744,7 +3710,7 @@ function App() {
   ) {
     event.stopPropagation();
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接拖拽，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接拖拽，请先复制新版本");
       return;
     }
     setSelectedRegionId(item.id);
@@ -2808,11 +3774,11 @@ function App() {
 
   async function saveCurrentRegions() {
     if (!selectedTemplateId) {
-      setNotice("请先选择要保存题区的模版");
+      setNotice("请先选择要保存题区的答题卡");
       return;
     }
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接保存题区，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接保存题区，请先复制新版本");
       return;
     }
     setTemplatesState({ status: "processing", message: "正在保存题区", detail: "批量写入当前画布区域。" });
@@ -2836,9 +3802,9 @@ function App() {
       setTemplatesState({
         status: "error",
         message: "题区批量保存 API 请求失败",
-        detail: "已更新本地模版库，可稍后重试 API。"
+        detail: "已更新本地答题卡库，可稍后重试 API。"
       });
-      setNotice(`${localTemplate.name} 的题区已保存到本地模版库`);
+      setNotice(`${localTemplate.name} 的题区已保存到本地答题卡库`);
     }
   }
 
@@ -2847,7 +3813,7 @@ function App() {
       return;
     }
     if (!canEditSelectedTemplate) {
-      setNotice("已发布或停用模版不可直接删除题区，请先复制新版本");
+      setNotice("已发布或停用答题卡不可直接删除题区，请先复制新版本");
       return;
     }
     const deletingRegionID = selectedRegionId;
@@ -2884,7 +3850,7 @@ function App() {
     setScore(clampScore(data.ai.score, data.fullScore));
     setNote(data.ai.reason);
     setReviewStage("first_review");
-    setQueueStatus("已连接数据库队列");
+    setQueueStatus("已连接阅卷队列");
     setSavedState("未保存");
     setPaperZoom(1);
     setPaperRotation(0);
@@ -3120,6 +4086,18 @@ function App() {
           })}
         </nav>
 
+        {currentRole === "guardian" ? (
+          <GuardianChildConfig
+            children={guardianChildren}
+            onNotice={setNotice}
+            onSelect={(studentId) => {
+              setSelectedGuardianStudentId(studentId);
+              if (activeView !== "workspace") openView("workspace");
+            }}
+            selectedStudentId={selectedGuardianStudentId}
+          />
+        ) : null}
+
         <div className="role-card">
           <div>
             <span>当前角色</span>
@@ -3138,8 +4116,8 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{currentRole === "student" ? "Student Portal" : currentRole === "guardian" ? "Guardian Portal" : viewCopy[activeView].eyebrow}</p>
-            <h1>{currentRole === "student" ? "我的学习进展" : currentRole === "guardian" ? "孩子学情与成长建议" : viewCopy[activeView].title}</h1>
+            <p className="eyebrow">{isPortalRole && activeView === "workspace" ? currentRole === "student" ? "Student Portal" : "Guardian Portal" : viewCopy[activeView].eyebrow}</p>
+            <h1>{isPortalRole && activeView === "workspace" ? currentRole === "student" ? "我的学习进展" : "孩子学情与成长建议" : viewCopy[activeView].title}</h1>
             {activeView !== "templates" ? <span className="top-notice">{notice}</span> : null}
           </div>
           <div className="top-actions">
@@ -3151,11 +4129,11 @@ function App() {
                 ))}
               </select>
             </label>
-            <button className="icon-button" onClick={() => toggleOverlay("filter")} title="筛选" type="button"><SlidersHorizontal size={18} /></button>
-            <button className="icon-button" onClick={() => toggleOverlay("notifications")} title="通知" type="button"><Bell size={18} /></button>
+            {!isPortalRole ? <button className="icon-button" onClick={() => toggleOverlay("filter")} title="筛选" type="button"><SlidersHorizontal size={18} /></button> : null}
+            {!isPortalRole ? <button className="icon-button" onClick={() => toggleOverlay("notifications")} title="通知" type="button"><Bell size={18} /></button> : null}
             {can("template:edit") ? (
               <button className="secondary-button" onClick={openTemplateCreate} type="button">
-                <FileStack size={18} />新建模板
+                <FileStack size={18} />生成答题卡
               </button>
             ) : null}
             {can("scan:create") ? (
@@ -3168,7 +4146,7 @@ function App() {
               </button>
             ) : null}
           </div>
-          {overlay ? (
+          {overlay && !isPortalRole ? (
             <div className="floating-panel">
               {overlay === "filter" ? (
                 <>
@@ -3191,20 +4169,15 @@ function App() {
           ) : null}
         </header>
 
-        <ConnectionStatusBar
-          apiStatus={activeConnection.apiStatus}
-          databaseStatus={activeConnection.databaseStatus}
-          note={activeConnection.note}
-          storageStatus={activeConnection.storageStatus}
-        />
-
-        {(currentRole === "student" || currentRole === "guardian") && activeView === "workspace" ? (
-          <PortalView role={currentRole} onNotice={setNotice} />
-        ) : null}
-
         {currentRole === "admin" && activeView === "organization" ? <OrganizationView onNotice={setNotice} /> : null}
 
-        {currentRole !== "student" && currentRole !== "guardian" && activeView !== "templates" && activeView !== "organization" ? (
+        {activeView === "questionBank" ? <QuestionBankView onNotice={setNotice} /> : null}
+
+        {activeView === "paperFlow" ? <PaperFlowView onNotice={setNotice} /> : null}
+
+        {activeView === "aiTasks" ? <AITasksView onNotice={setNotice} /> : null}
+
+        {!isPortalRole && activeView !== "templates" && activeView !== "organization" && activeView !== "questionBank" && activeView !== "paperFlow" && activeView !== "aiTasks" ? (
           <>
             <RequestStateView state={dashboardState} onRetry={() => loadDashboard()} compact />
             {dashboard.metrics.length > 0 ? (
@@ -3230,40 +4203,59 @@ function App() {
               </div>
               <button className="ghost-button" onClick={() => openView("workspace")} type="button">返回工作台</button>
             </div>
-            <div className="form-grid">
-              <label>
-                考试/作业名称
+            <div className="form-grid scan-form-grid">
+              <label className="scan-type-field">
+                扫描类型
+                <div className="scan-type-switch">
+                  {(Object.keys(scanTypeLabels) as ScanType[]).map((type) => (
+                    <button
+                      className={scanType === type ? "active" : ""}
+                      key={type}
+                      onClick={() => setScanType(type)}
+                      type="button"
+                    >
+                      <strong>{scanTypeLabels[type]}</strong>
+                      <span>{scanTypeDescriptions[type]}</span>
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="scan-title-field">
+                {scanType === "paper" ? "试卷名称" : "考试/作业名称"}
                 <input onChange={(event: { target: { value: string } }) => setScanTitle(event.target.value)} value={scanTitle} />
               </label>
-              <label>
+              <label className="scan-class-field">
                 班级
                 <input onChange={(event: { target: { value: string } }) => setScanClassName(event.target.value)} value={scanClassName} />
               </label>
-              <label>
-                绑定模板
-                <select onChange={(event: { target: { value: string } }) => setScanTemplateId(event.target.value)} value={scanTemplateId}>
-                  <option value="">请选择模板</option>
+              <label className="scan-template-field">
+                绑定答题卡
+                <select disabled={scanType === "paper"} onChange={(event: { target: { value: string } }) => setScanTemplateId(event.target.value)} value={scanType === "paper" ? "" : scanTemplateId}>
+                  <option value="">{scanType === "paper" ? "试卷导入后生成答题卡" : "请选择答题卡"}</option>
                   {publishedTemplates.map((template) => (
                     <option key={template.id} value={template.id}>
                       {template.name} · V{template.version ?? 1}
                     </option>
                   ))}
                 </select>
-                {publishedTemplates.length === 0 ? <span className="form-hint">请先在模板库发布模板</span> : null}
+                {scanType === "answer_sheet" && publishedTemplates.length === 0 ? <span className="form-hint">请先在“生成答题卡”发布答题卡</span> : null}
+                {scanType === "paper" ? <span className="form-hint">第 1 步导入试卷不需要绑定答题卡。</span> : null}
               </label>
-              <label>
+              <label className="scan-pages-field">
                 页数
                 <input min={1} onChange={(event: { target: { value: string } }) => setScanPages(Number(event.target.value))} type="number" value={scanPages} />
               </label>
-              <label className="wide-field">
+              <label className="scan-notes-field">
                 备注
                 <textarea onChange={(event: { target: { value: string } }) => setScanNotes(event.target.value)} rows={3} value={scanNotes} />
               </label>
             </div>
-            <div className="upload-zone">
+            <div className="upload-zone scan-upload-zone">
               <ScanLine size={28} />
-              <strong>扫描件暂存区</strong>
-              <span>支持 PDF、PNG、JPG、WebP 和 ZIP 扫描包，单文件不超过 {formatFileSize(maxScanFileSizeBytes)}。</span>
+              <div className="scan-upload-copy">
+                <strong>扫描件暂存区</strong>
+                <span>支持 PDF、PNG、JPG、WebP 和 ZIP 扫描包，单文件不超过 {formatFileSize(maxScanFileSizeBytes)}。</span>
+              </div>
               <input
                 accept={allowedScanExtensions.join(",")}
                 multiple
@@ -3336,8 +4328,8 @@ function App() {
                     <div>
                       <strong>{job.title}</strong>
                       <span>
-                        {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
-                        {job.templateId ? ` · 模板 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
+                        {scanTypeLabel(job.scanType)} · {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
+                        {job.templateId ? ` · 答题卡 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
                       </span>
                       {job.failureReason ? <small className="row-error">{job.failureReason}</small> : null}
                     </div>
@@ -3462,8 +4454,8 @@ function App() {
                     <div>
                       <strong>{job.title}</strong>
                       <span>
-                        {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
-                        {job.templateId ? ` · 模板 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
+                        {scanTypeLabel(job.scanType)} · {job.className} · {job.pages} 页 · {job.status} · {scanQueueLabel(job.queueStatus)}
+                        {job.templateId ? ` · 答题卡 ${job.templateId} V${job.templateVersion ?? 1}` : ""} · 任务 {job.id}
                       </span>
                       {job.failureReason ? <small className="row-error">{job.failureReason}</small> : null}
                     </div>
@@ -3609,7 +4601,7 @@ function App() {
                 <div className="grading-head-actions">
                   <div className="segmented">
                     <button className={activeMode === "review" ? "active" : ""} onClick={() => setActiveMode("review")}>左右分屏批阅</button>
-                    <button className={activeMode === "template" ? "active" : ""} onClick={() => setActiveMode("template")}>模板信息</button>
+                    <button className={activeMode === "template" ? "active" : ""} onClick={() => setActiveMode("template")}>答题卡信息</button>
                   </div>
                   <div className="review-nav-actions">
                     <button className="ghost-button" disabled={selectedReviewIndex <= 0} onClick={() => void openAdjacentReview(-1)} type="button">上一题</button>
@@ -3747,7 +4739,7 @@ function App() {
               ) : (
                 <div className="template-preview">
                   <div className="paper-canvas">
-                    <div className="paper-title-line">{selectedTemplate?.name ?? "试卷模板"}</div>
+                    <div className="paper-title-line">{selectedTemplate?.name ?? "答题卡"}</div>
                     {selectedTemplate?.questions.map((question) => (
                       <div
                         className={question.id === selectedTemplateQuestion?.id ? "question-region active" : "question-region"}
@@ -3759,7 +4751,7 @@ function App() {
                     ))}
                   </div>
                   <div className="template-side">
-                    <h3>{selectedTemplate?.name ?? "试卷模板"}</h3>
+                    <h3>{selectedTemplate?.name ?? "试卷答题卡"}</h3>
                     <div className="template-selector">
                       {templates.map((template) => (
                         <button
@@ -3779,7 +4771,7 @@ function App() {
                     </p>
                     <p>知识点：{(selectedTemplateQuestion?.knowledge ?? subjective.standardAnswer.knowledge).join("、")}</p>
                     {can("template:edit") ? (
-                      <button className="secondary-button" onClick={() => openView("templates")} type="button"><FileStack size={18} />编辑模板</button>
+                      <button className="secondary-button" onClick={() => openView("templates")} type="button"><FileStack size={18} />编辑答题卡</button>
                     ) : null}
                   </div>
                 </div>
@@ -3829,23 +4821,34 @@ function App() {
           <section className="grading-panel">
             <div className="grading-head">
               <div>
-                <p className="eyebrow">Template Editor</p>
+                <p className="eyebrow">Answer Sheet Generator</p>
                 <h2>{canvasTitle}</h2>
                 <span>{selectedPaperSource?.source ?? "未选择来源"} · {canvasSize.label} · {canvasSize.width} x {canvasSize.height} · 缩放 {Math.round(canvasZoom * 100)}%</span>
               </div>
               {can("template:ai") ? (
                 <button className="secondary-button" onClick={() => void generateTemplateAISuggestions()} type="button">
-                  <Sparkles size={18} />AI 拆卷建议
+                  <Sparkles size={18} />AI 生成答题卡
                 </button>
               ) : null}
             </div>
             <RequestStateView state={templatesState} onRetry={() => loadTemplates()} compact />
+            <div className="answer-sheet-flow">
+              {[
+                "试卷扫描导入",
+                "AI 生成答题卡",
+                "答题卡扫描",
+                "自动阅卷",
+                "保存结果与学情分析"
+              ].map((step, index) => (
+                <span key={step}><strong>{index + 1}</strong>{step}</span>
+              ))}
+            </div>
             {can("template:ai") && aiSuggestionState.status !== "empty" ? (
               <div className="ai-suggestion-bar">
                 <RequestStateView state={aiSuggestionState} compact />
                 {aiSuggestedRegions.length > 0 ? (
                   <button className="primary-button" disabled={!canEditSelectedTemplate} onClick={() => void confirmTemplateAISuggestions()} type="button">
-                    <Check size={18} />确认写入模板库
+                    <Check size={18} />确认写入答题卡库
                   </button>
                 ) : null}
               </div>
@@ -3874,7 +4877,7 @@ function App() {
                         key={preset.label}
                         onClick={() => {
                           setCanvasSize(preset);
-                          setNotice(`已导入${preset.label}模板`);
+                          setNotice(`已导入${preset.label}答题卡`);
                         }}
                         type="button"
                       >
@@ -3939,49 +4942,54 @@ function App() {
                 </div>
               </div>
               <div className="template-side">
-                <h3>试卷来源</h3>
-                <div className="source-toggle">
-                  {can("scan:create") ? (
-                    <button
-                      className={templateSourceMode === "scan" ? "active" : ""}
-                      onClick={() => {
-                        setTemplateSourceMode("scan");
-                        importTemplateScanFromCurrentTask();
-                      }}
-                      type="button"
-                    >
-                      导入扫描件
-                    </button>
-                  ) : null}
-                  <button
-                    className={templateSourceMode === "library" ? "active" : ""}
-                    onClick={() => setTemplateSourceMode("library")}
-                    type="button"
-                  >
-                    从库存选择
-                  </button>
-                </div>
-                {templateSourceMode === "library" ? (
-                  <div className="source-list">
-                    {paperSources.map((source) => (
+                <section className="template-source-panel">
+                  <div className="template-source-head">
+                    <h3>试卷来源</h3>
+                    <span>{selectedPaperSource?.title ?? "未选择试卷"}</span>
+                  </div>
+                  <div className="source-toggle">
+                    {can("scan:create") ? (
                       <button
-                        className={source.id === selectedPaperSourceId ? "source-card active" : "source-card"}
-                        key={source.id}
-                        onClick={() => applyPaperSource(source)}
+                        className={templateSourceMode === "scan" ? "active" : ""}
+                        onClick={() => {
+                          setTemplateSourceMode("scan");
+                          importTemplateScanFromCurrentTask();
+                        }}
                         type="button"
                       >
-                        <strong>{source.title}</strong>
-                        <span>{source.className} · {source.pages} 页 · {source.size.label}</span>
-                        <em>{source.importedAt}</em>
+                        导入扫描件
                       </button>
-                    ))}
+                    ) : null}
+                    <button
+                      className={templateSourceMode === "library" ? "active" : ""}
+                      onClick={() => setTemplateSourceMode("library")}
+                      type="button"
+                    >
+                      从库存选择
+                    </button>
                   </div>
-                ) : null}
-                <h3>模版库</h3>
+                  {templateSourceMode === "library" ? (
+                    <div className="source-list">
+                      {paperSources.map((source) => (
+                        <button
+                          className={source.id === selectedPaperSourceId ? "source-card active" : "source-card"}
+                          key={source.id}
+                          onClick={() => applyPaperSource(source)}
+                          type="button"
+                        >
+                          <strong>{source.title}</strong>
+                          <span>{source.className} · {source.pages} 页 · {source.size.label}</span>
+                          <em>{source.importedAt}</em>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+                <h3>答题卡库</h3>
                 <TableToolbar
                   batchLabel="批量发布"
 	                  filterOptions={[
-	                    { label: "全部模板", value: "all" },
+	                    { label: "全部答题卡", value: "all" },
 	                    { label: "草稿", value: "status:draft" },
 	                    { label: "已发布", value: "status:published" },
 	                    { label: "停用", value: "status:disabled" },
@@ -3989,7 +4997,7 @@ function App() {
 	                    { label: "六年级", value: "六年级" }
 	                  ]}
                   filterValue={templateFilter}
-                  onBatchAction={() => runBatchAction("模板库批量操作", selectedTemplateIds.length)}
+                  onBatchAction={() => runBatchAction("答题卡库批量操作", selectedTemplateIds.length)}
                   onFilterChange={(value) => {
                     setTemplateFilter(value);
                     setTemplatePage(1);
@@ -4002,7 +5010,7 @@ function App() {
                     setTemplateSort(value);
                     setTemplatePage(1);
                   }}
-                  searchPlaceholder="模板名称、年级或学科"
+                  searchPlaceholder="答题卡名称、年级或学科"
                   searchValue={templateSearch}
                   selectedCount={selectedTemplateIds.length}
                   sortOptions={[
@@ -4050,22 +5058,22 @@ function App() {
                     <RequestStateView
                       compact
                       onRetry={() => loadTemplates()}
-                      state={{ status: "empty", message: "没有符合条件的模版", detail: "调整搜索或筛选条件后重试。" }}
+                      state={{ status: "empty", message: "没有符合条件的答题卡", detail: "调整搜索或筛选条件后重试。" }}
                     />
                   )}
                 </div>
                 <TablePagination page={templatePage} total={filteredTemplates.length} onPageChange={setTemplatePage} />
-                <h3>模板设置</h3>
+                <h3>答题卡设置</h3>
                 <div className="region-style-editor">
                   <label>
-                    模板名称
+                    答题卡名称
                     <input
                       onChange={(event: { target: { value: string } }) => setCanvasTitle(event.target.value)}
                       value={canvasTitle}
                     />
                   </label>
                 </div>
-	                <p>模版库总数：{templates.length} 个</p>
+	                <p>答题卡库总数：{templates.length} 个</p>
 	                <p>当前状态：{templateStatusLabels[selectedTemplateStatus]} · V{selectedTemplate?.version ?? 1}</p>
 	                <p>来源文件：{selectedTemplate?.sourceFileUrl || "未绑定"}</p>
 	                <p>区域数量：{canvasRegions.length} 个</p>
@@ -4185,7 +5193,7 @@ function App() {
 	                    />
 	                  </label>
 	                  {!canEditSelectedTemplate ? (
-	                    <div className="permission-note">当前模板已发布或停用，请复制新版本后编辑题目结构。</div>
+	                    <div className="permission-note">当前答题卡已发布或停用，请复制新版本后编辑题目结构。</div>
 	                  ) : null}
 	                </div>
 	                <h3>草稿箱</h3>
@@ -4208,14 +5216,14 @@ function App() {
                 <div className="decision-actions">
                   {can("template:edit") ? (
                     <>
-	                      <button className="secondary-button" onClick={saveCurrentAsTemplate} type="button"><FileStack size={18} />保存为模版</button>
-		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={updateCurrentTemplate} type="button"><FileStack size={18} />更新模版</button>
+	                      <button className="secondary-button" onClick={saveCurrentAsTemplate} type="button"><FileStack size={18} />保存为答题卡</button>
+		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={updateCurrentTemplate} type="button"><FileStack size={18} />更新答题卡</button>
 		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={saveCurrentRegions} type="button"><Check size={18} />保存题区</button>
 	                      <button className="primary-button" onClick={saveTemplateDraft} type="button"><Check size={18} />保存草稿</button>
 		                      <button className="ghost-button" disabled={!canEditSelectedTemplate} onClick={() => void deleteSelectedRegion()} type="button">删除区域</button>
                     </>
                   ) : (
-                    <div className="permission-note">当前角色仅可查看模板，不能编辑或保存。</div>
+                    <div className="permission-note">当前角色仅可查看答题卡，不能编辑或保存。</div>
                   )}
                   {can("grading:review") ? (
                     <button className="ghost-button" onClick={openReviewQueue} type="button">进入阅卷</button>
@@ -4366,7 +5374,7 @@ function App() {
           </section>
         ) : null}
 
-        {activeView === "workspace" || activeView === "analytics" ? (
+        {!isPortalRole && (activeView === "workspace" || activeView === "analytics") ? (
         <section className="insight-grid">
           <div className="panel">
             <div className="panel-head">
@@ -4374,10 +5382,12 @@ function App() {
                 <p className="eyebrow">Class Analytics</p>
                 <h2>{analytics.className} 学情概览</h2>
               </div>
-              <div className="analytics-actions">
-                <button className="secondary-button" onClick={exportScores} type="button"><FileStack size={18} />导出报表</button>
-                <button className="primary-button" onClick={() => void generateScores()} type="button"><Check size={18} />生成成绩</button>
-              </div>
+              {canManageAnalytics ? (
+                <div className="analytics-actions">
+                  <button className="secondary-button" onClick={exportScores} type="button"><FileStack size={18} />导出报表</button>
+                  <button className="primary-button" onClick={() => void generateScores()} type="button"><Check size={18} />生成成绩</button>
+                </div>
+              ) : null}
             </div>
             <RequestStateView state={analyticsState} onRetry={() => loadAnalytics()} compact />
             <div className="score-summary">
@@ -4477,7 +5487,7 @@ function App() {
                       <span>{item.reason}</span>
                     </div>
                     <em>{item.answer || "缺答"} · {item.confidence}% · {item.status}</em>
-                    <button className="template-chip" onClick={() => confirmObjectiveException(item.id)} type="button">人工确认</button>
+                    {canManageAnalytics ? <button className="template-chip" onClick={() => confirmObjectiveException(item.id)} type="button">人工确认</button> : null}
                   </div>
                 ))}
               </div>
@@ -4559,6 +5569,16 @@ function App() {
             )}
           </div>
         </section>
+        ) : null}
+
+        {isPortalRole && activeView === "workspace" ? (
+          <PortalView
+            onGuardianChildrenChange={setGuardianChildren}
+            onGuardianStudentChange={setSelectedGuardianStudentId}
+            onNotice={setNotice}
+            role={currentRole}
+            selectedStudentId={currentRole === "guardian" ? selectedGuardianStudentId : undefined}
+          />
         ) : null}
       </main>
     </div>

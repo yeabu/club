@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -52,14 +53,21 @@ class WorkerConfig:
     redis_group: str
     redis_consumer: str
     api_base_url: str
+    paddleocr_service_url: str
     result_dir: Path
     sample_manifest: Path
     model_version: str
     storage_driver: str
     enable_redis_consumer: bool
+    ai_provider: str
+    anthropic_base_url: str
+    anthropic_auth_token: str
+    anthropic_model: str
+    ai_timeout_seconds: int
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
+        anthropic_model = os.getenv("ANTHROPIC_MODEL", "").strip()
         return cls(
             app_env=os.getenv("APP_ENV", "development"),
             port=int(os.getenv("AI_WORKER_PORT", "8090")),
@@ -70,11 +78,17 @@ class WorkerConfig:
             redis_group=os.getenv("AI_WORKER_REDIS_GROUP", "club-ai-worker"),
             redis_consumer=os.getenv("AI_WORKER_REDIS_CONSUMER", socket.gethostname()),
             api_base_url=os.getenv("API_BASE_URL", "http://localhost:8080").rstrip("/"),
+            paddleocr_service_url=os.getenv("PADDLEOCR_SERVICE_URL", "").strip().rstrip("/"),
             result_dir=Path(os.getenv("AI_WORKER_RESULT_DIR", "var/ai-worker/results")),
             sample_manifest=Path(os.getenv("AI_WORKER_SAMPLE_MANIFEST", "samples/manifest.json")),
-            model_version=os.getenv("AI_MODEL_VERSION", "mock-ai-worker-v1"),
+            model_version=os.getenv("AI_MODEL_VERSION", anthropic_model or "mock-ai-worker-v1"),
             storage_driver=os.getenv("STORAGE_DRIVER", "minio"),
             enable_redis_consumer=env_bool("AI_WORKER_CONSUME_REDIS", False),
+            ai_provider=os.getenv("AI_PROVIDER", "").strip().lower(),
+            anthropic_base_url=os.getenv("ANTHROPIC_BASE_URL", "").strip().rstrip("/"),
+            anthropic_auth_token=os.getenv("ANTHROPIC_AUTH_TOKEN", "").strip(),
+            anthropic_model=anthropic_model,
+            ai_timeout_seconds=int(os.getenv("AI_TIMEOUT_SECONDS", "45")),
         )
 
     def public(self) -> dict[str, Any]:
@@ -93,6 +107,17 @@ class WorkerConfig:
             },
             "api": {
                 "baseUrl": self.api_base_url,
+            },
+            "ocr": {
+                "provider": "remote-paddleocr" if self.paddleocr_service_url else ("paddleocr" if env_bool("AI_WORKER_USE_PADDLEOCR", False) else "mock-ocr"),
+                "paddleocrServiceUrl": self.paddleocr_service_url,
+            },
+            "ai": {
+                "provider": self.ai_provider or ("anthropic" if self.anthropic_auth_token else "mock"),
+                "baseUrl": self.anthropic_base_url,
+                "model": self.anthropic_model or self.model_version,
+                "authTokenConfigured": bool(self.anthropic_auth_token),
+                "timeoutSeconds": self.ai_timeout_seconds,
             },
             "samples": {
                 "manifest": str(self.sample_manifest),
@@ -148,7 +173,91 @@ class PaddleOCRAdapter(MockOCRAdapter):
             raise RuntimeError("paddleocr package is not installed")
 
 
+class RemotePaddleOCRAdapter(MockOCRAdapter):
+    name = "remote-paddleocr"
+
+    def __init__(self, base_url: str, api_base_url: str = "") -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_base_url = api_base_url.rstrip("/")
+        if not self.base_url:
+            raise RuntimeError("PADDLEOCR_SERVICE_URL is empty")
+
+    def extract(self, file_ref: dict[str, Any]) -> dict[str, Any]:
+        content = self._load_content(file_ref)
+        if content is None:
+            raise RuntimeError("remote PaddleOCR requires file content or a readable local path")
+        file_name = str(file_ref.get("fileName") or file_ref.get("key") or "scan.jpg")
+        payload = {
+            "fileName": file_name,
+            "contentBase64": base64_encode(content),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/ocr/base64",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return {
+            "provider": self.name,
+            "objectKey": file_ref.get("key") or file_ref.get("url") or file_name,
+            "text": result.get("text", ""),
+            "confidence": average_confidence(result.get("blocks", [])),
+            "blocks": result.get("blocks", []),
+            "elapsedMs": result.get("elapsedMs", 0),
+        }
+
+    def _load_content(self, file_ref: dict[str, Any]) -> bytes | None:
+        raw_base64 = file_ref.get("contentBase64")
+        if isinstance(raw_base64, str) and raw_base64:
+            import base64
+
+            return base64.b64decode(raw_base64)
+        for key in ("localPath", "path"):
+            raw_path = file_ref.get(key)
+            if isinstance(raw_path, str) and raw_path:
+                path = Path(raw_path)
+                if path.exists() and path.is_file():
+                    return path.read_bytes()
+        raw_url = file_ref.get("url")
+        if isinstance(raw_url, str) and raw_url.startswith("/") and self.api_base_url:
+            raw_url = self.api_base_url + raw_url
+        if isinstance(raw_url, str) and raw_url.startswith(("http://", "https://")):
+            with urllib.request.urlopen(raw_url, timeout=15) as response:
+                return response.read()
+        return None
+
+
+def base64_encode(content: bytes) -> str:
+    import base64
+
+    return base64.b64encode(content).decode("ascii")
+
+
+def average_confidence(blocks: Any) -> int:
+    if not isinstance(blocks, list) or not blocks:
+        return 0
+    scores: list[float] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        score = block.get("confidence")
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+    if not scores:
+        return 0
+    average = sum(scores) / len(scores)
+    if average <= 1:
+        average *= 100
+    return int(max(0, min(100, average)))
+
+
 def build_ocr_adapter() -> MockOCRAdapter:
+    service_url = os.getenv("PADDLEOCR_SERVICE_URL", "").strip()
+    if service_url:
+        return RemotePaddleOCRAdapter(service_url, os.getenv("API_BASE_URL", "http://localhost:8080"))
     if env_bool("AI_WORKER_USE_PADDLEOCR", False):
         try:
             return PaddleOCRAdapter()
@@ -189,7 +298,158 @@ def recognize_omr(file_ref: dict[str, Any], template: dict[str, Any] | None = No
     return {"provider": "mock-omr", "answers": answers}
 
 
+class AIAdapter:
+    name = "mock"
+
+    def analyze_paper(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return mock_analyze_paper(payload)
+
+    def grade_subjective(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return mock_grade_subjective(payload)
+
+    def detect_wrong_reason(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return mock_detect_wrong_reason(payload)
+
+
+class AnthropicCompatibleAIAdapter(AIAdapter):
+    name = "anthropic-compatible"
+
+    def __init__(self, base_url: str, auth_token: str, model: str, timeout_seconds: int = 45) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.auth_token = auth_token
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.ssl_context = make_ssl_context()
+        if not self.base_url:
+            raise RuntimeError("ANTHROPIC_BASE_URL is empty")
+        if not self.auth_token:
+            raise RuntimeError("ANTHROPIC_AUTH_TOKEN is empty")
+        if not self.model:
+            raise RuntimeError("ANTHROPIC_MODEL is empty")
+
+    def analyze_paper(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fallback = mock_analyze_paper(payload)
+        prompt = (
+            "请根据输入的试卷扫描/OCR上下文生成答题卡模板建议。"
+            "只返回 JSON，不要 Markdown。字段必须包含：paperName, questionCount, totalScore,"
+            " suggestedQuestions, reviewRequired。suggestedQuestions 每项包含 id,no,questionNo,type,"
+            " score,standardAnswer,scoringRules,knowledge,region。region 包含 page,x,y,width,height。"
+            "\n输入：\n" + json.dumps(payload, ensure_ascii=False)
+        )
+        result = self._request_json("paper-analyze", prompt, fallback)
+        if result.pop("_aiProviderFallback", False):
+            return fallback
+        result["paperName"] = str(result.get("paperName") or fallback["paperName"])
+        result["questionCount"] = to_int(result.get("questionCount"), fallback["questionCount"])
+        result["totalScore"] = to_float(result.get("totalScore"), fallback["totalScore"])
+        result["suggestedQuestions"] = normalize_suggested_questions(result.get("suggestedQuestions"), fallback["suggestedQuestions"])
+        result["reviewRequired"] = bool(result.get("reviewRequired", True))
+        result["source"] = self.name
+        result["modelVersion"] = self.model
+        return result
+
+    def grade_subjective(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fallback = mock_grade_subjective(payload)
+        prompt = (
+            "你是阅卷系统的主观题评分助手。请严格根据标准答案、评分规则和学生OCR文本给出建议分。"
+            "只返回 JSON，不要 Markdown。字段必须包含：score,fullScore,reason,evidence,comments,confidence。"
+            "score 不得超过 fullScore，confidence 为 0-100。"
+            "\n输入：\n" + json.dumps(payload, ensure_ascii=False)
+        )
+        result = self._request_json("subjective-grading", prompt, fallback)
+        if result.pop("_aiProviderFallback", False):
+            return fallback
+        full_score = to_float(result.get("fullScore"), to_float(payload.get("fullScore") or payload.get("score"), fallback["fullScore"]))
+        score = min(full_score, max(0.0, to_float(result.get("score"), fallback["score"])))
+        return {
+            "score": round(score, 1),
+            "fullScore": full_score,
+            "reason": str(result.get("reason") or fallback["reason"]),
+            "evidence": normalize_string_list(result.get("evidence"), fallback["evidence"]),
+            "comments": normalize_string_list(result.get("comments"), fallback["comments"]),
+            "confidence": clamp_int(result.get("confidence"), fallback["confidence"], 0, 100),
+            "modelVersion": self.model,
+            "source": self.name,
+        }
+
+    def detect_wrong_reason(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fallback = mock_detect_wrong_reason(payload)
+        prompt = (
+            "你是学情分析助手。请根据学生答案、标准答案、知识点和评分情况判断错因。"
+            "只返回 JSON，不要 Markdown。字段必须包含：wrongReason,errorType,knowledge,trainingHint,confidence。"
+            "confidence 为 0-100。"
+            "\n输入：\n" + json.dumps(payload, ensure_ascii=False)
+        )
+        result = self._request_json("wrong-reason", prompt, fallback)
+        if result.pop("_aiProviderFallback", False):
+            return fallback
+        return {
+            "wrongReason": str(result.get("wrongReason") or fallback["wrongReason"]),
+            "errorType": str(result.get("errorType") or fallback["errorType"]),
+            "knowledge": normalize_string_list(result.get("knowledge"), fallback["knowledge"]),
+            "trainingHint": str(result.get("trainingHint") or fallback["trainingHint"]),
+            "confidence": clamp_int(result.get("confidence"), fallback["confidence"], 0, 100),
+            "modelVersion": self.model,
+            "source": self.name,
+        }
+
+    def _request_json(self, task: str, prompt: str, fallback: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(
+            {
+                "model": self.model,
+                "max_tokens": 1800,
+                "temperature": 0.2,
+                "system": "你是阅卷与学情平台的结构化 JSON 任务执行器。必须只输出一个合法 JSON 对象。",
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            anthropic_messages_url(self.base_url),
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "x-api-key": self.auth_token,
+                "Authorization": f"Bearer {self.auth_token}",
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds, context=self.ssl_context) as response:
+                response_body = response.read().decode("utf-8")
+            return parse_ai_json_response(json.loads(response_body))
+        except Exception as exc:
+            log_event("ai_provider_failed", provider=self.name, task=task, model=self.model, error=str(exc), fallback="mock")
+            result = dict(fallback)
+            result["_aiProviderFallback"] = True
+            return result
+
+
+def build_ai_adapter(config: WorkerConfig | None = None) -> AIAdapter:
+    provider = (config.ai_provider if config else os.getenv("AI_PROVIDER", "")).strip().lower()
+    base_url = (config.anthropic_base_url if config else os.getenv("ANTHROPIC_BASE_URL", "")).strip().rstrip("/")
+    auth_token = (config.anthropic_auth_token if config else os.getenv("ANTHROPIC_AUTH_TOKEN", "")).strip()
+    model = (config.anthropic_model if config else os.getenv("ANTHROPIC_MODEL", "")).strip()
+    timeout_seconds = config.ai_timeout_seconds if config else int(os.getenv("AI_TIMEOUT_SECONDS", "45"))
+    if provider in {"", "anthropic", "anthropic-compatible", "deepseek"} and auth_token:
+        return AnthropicCompatibleAIAdapter(base_url, auth_token, model, timeout_seconds)
+    return AIAdapter()
+
+
 def analyze_paper(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_ai_adapter().analyze_paper(payload)
+
+
+def grade_subjective(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_ai_adapter().grade_subjective(payload)
+
+
+def detect_wrong_reason(payload: dict[str, Any]) -> dict[str, Any]:
+    return build_ai_adapter().detect_wrong_reason(payload)
+
+
+def mock_analyze_paper(payload: dict[str, Any]) -> dict[str, Any]:
     paper_name = payload.get("paperName") or payload.get("title") or "未命名试卷"
     return {
         "paperName": paper_name,
@@ -235,7 +495,7 @@ def analyze_paper(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def grade_subjective(payload: dict[str, Any]) -> dict[str, Any]:
+def mock_grade_subjective(payload: dict[str, Any]) -> dict[str, Any]:
     full_score = float(payload.get("fullScore") or payload.get("score") or 10)
     student_answer = str(payload.get("studentAnswer") or payload.get("ocrText") or "")
     standard_answer = str(payload.get("standardAnswer") or "")
@@ -260,7 +520,7 @@ def grade_subjective(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def detect_wrong_reason(payload: dict[str, Any]) -> dict[str, Any]:
+def mock_detect_wrong_reason(payload: dict[str, Any]) -> dict[str, Any]:
     answer = str(payload.get("studentAnswer") or payload.get("ocrText") or "")
     knowledge = payload.get("knowledge") or ["比例", "应用题建模"]
     if not isinstance(knowledge, list):
@@ -281,6 +541,119 @@ def detect_wrong_reason(payload: dict[str, Any]) -> dict[str, Any]:
         "trainingHint": "建议安排 5 道同知识点分层练习，并要求补写完整订正过程。",
         "confidence": 82,
     }
+
+
+def anthropic_messages_url(base_url: str) -> str:
+    if base_url.endswith("/messages"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/messages"
+    return f"{base_url}/v1/messages"
+
+
+def make_ssl_context() -> ssl.SSLContext:
+    default_paths = ssl.get_default_verify_paths()
+    if default_paths.cafile and Path(default_paths.cafile).exists():
+        return ssl.create_default_context()
+    for candidate in ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/usr/local/etc/openssl@3/cert.pem"]:
+        if Path(candidate).exists():
+            return ssl.create_default_context(cafile=candidate)
+    return ssl.create_default_context()
+
+
+def parse_ai_json_response(response: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(response.get("output_text"), str):
+        text = response["output_text"]
+    else:
+        parts = []
+        content = response.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item, str):
+                    parts.append(item)
+        text = "\n".join(parts)
+    data = extract_json_object(text)
+    if not isinstance(data, dict):
+        raise RuntimeError("AI response is not a JSON object")
+    return data
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    value = text.strip()
+    if value.startswith("```"):
+        value = value.strip("`").strip()
+        if value.startswith("json"):
+            value = value[4:].strip()
+    start = value.find("{")
+    end = value.rfind("}")
+    if start >= 0 and end > start:
+        value = value[start : end + 1]
+    return json.loads(value)
+
+
+def normalize_suggested_questions(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        return fallback
+    questions = []
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, dict):
+            continue
+        question_no = str(raw.get("questionNo") or raw.get("no") or index)
+        questions.append(
+            {
+                "id": str(raw.get("id") or f"ai_q_{index:03d}"),
+                "no": str(raw.get("no") or question_no),
+                "questionNo": question_no,
+                "type": str(raw.get("type") or "subjective"),
+                "score": to_float(raw.get("score"), 0),
+                "standardAnswer": str(raw.get("standardAnswer") or ""),
+                "scoringRules": normalize_string_list(raw.get("scoringRules"), []),
+                "knowledge": normalize_string_list(raw.get("knowledge"), []),
+                "region": normalize_region(raw.get("region")),
+            }
+        )
+    return questions or fallback
+
+
+def normalize_region(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"page": 1, "x": 0, "y": 0, "width": 0, "height": 0}
+    return {
+        "page": to_int(value.get("page"), 1),
+        "x": to_float(value.get("x"), 0),
+        "y": to_float(value.get("y"), 0),
+        "width": to_float(value.get("width"), 0),
+        "height": to_float(value.get("height"), 0),
+    }
+
+
+def normalize_string_list(value: Any, fallback: list[Any]) -> list[str]:
+    if isinstance(value, list):
+        result = [str(item) for item in value if str(item).strip()]
+        return result or [str(item) for item in fallback]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return [str(item) for item in fallback]
+
+
+def to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, to_int(value, default)))
 
 
 class ResultWriter:
@@ -333,6 +706,7 @@ class Worker:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
         self.ocr = build_ocr_adapter()
+        self.ai = build_ai_adapter(config)
         self.writer = ResultWriter(config)
 
     def process_scan_task(self, payload: dict[str, Any], callback: bool = True) -> dict[str, Any]:
@@ -348,7 +722,18 @@ class Worker:
         for file_ref in files:
             file_start = time.perf_counter()
             preprocess = preprocess_scan(file_ref)
-            ocr = self.ocr.extract(file_ref)
+            try:
+                ocr = self.ocr.extract(file_ref)
+            except Exception as exc:
+                provider = getattr(self.ocr, "name", "unknown")
+                file_id = file_ref.get("key") or file_ref.get("url") or file_ref.get("fileName") or "unknown"
+                log_event("ocr_extract_failed", file=file_id, provider=provider, error=str(exc))
+                if self.config.paddleocr_service_url or provider in {"remote-paddleocr", "paddleocr"}:
+                    failure_reason = f"OCR识别失败：{file_id}"
+                    if callback:
+                        self.writer.update_status(task_id, "识别失败", 0, failure_reason)
+                    raise RuntimeError(f"{failure_reason}: {exc}") from exc
+                ocr = MockOCRAdapter().extract(file_ref)
             omr = recognize_omr(file_ref, template)
             processed_files.append(
                 {
@@ -360,14 +745,18 @@ class Worker:
                 }
             )
 
-        template_suggestion = analyze_paper(
+        template_suggestion = self.ai.analyze_paper(
             {
                 "paperName": payload.get("title") or payload.get("paperName"),
                 "sourceFileUrl": files[0].get("url") if files else "",
+                "ocrResults": [item["ocr"] for item in processed_files],
+                "scanType": payload.get("scanType", ""),
+                "templateId": payload.get("templateId", ""),
+                "templateVersion": payload.get("templateVersion", 0),
             }
         )
         subjective_results = [
-            grade_subjective(
+            self.ai.grade_subjective(
                 {
                     "fullScore": 10,
                     "standardAnswer": "先设未知数 x，列出比例关系 3:5 = x:40，解得 x = 24。",
@@ -377,7 +766,7 @@ class Worker:
             )
         ]
         wrong_reasons = [
-            detect_wrong_reason(
+            self.ai.detect_wrong_reason(
                 {
                     "studentAnswer": processed_files[0]["ocr"]["text"] if processed_files else "",
                     "knowledge": ["比例", "应用题建模"],
@@ -417,6 +806,7 @@ class RedisRESPClient:
     def connect(self) -> None:
         host, port = parse_addr(self.config.redis_addr)
         self.sock = socket.create_connection((host, port), timeout=5)
+        self.sock.settimeout(30)
         self.reader = self.sock.makefile("rb")
         if self.config.redis_password:
             self.command("AUTH", self.config.redis_password)
@@ -609,13 +999,13 @@ def make_handler(config: WorkerConfig, worker: Worker) -> type[BaseHTTPRequestHa
                 self.write_json(200, recognize_omr(payload, payload.get("template") if isinstance(payload.get("template"), dict) else None))
                 return
             if self.path == "/ai/paper/analyze":
-                self.write_json(200, analyze_paper(payload))
+                self.write_json(200, worker.ai.analyze_paper(payload))
                 return
             if self.path == "/ai/grading/subjective":
-                self.write_json(200, grade_subjective(payload))
+                self.write_json(200, worker.ai.grade_subjective(payload))
                 return
             if self.path == "/ai/wrong-reason":
-                self.write_json(200, detect_wrong_reason(payload))
+                self.write_json(200, worker.ai.detect_wrong_reason(payload))
                 return
             if self.path == "/worker/process-scan-task":
                 self.write_json(200, worker.process_scan_task(payload, callback=env_bool("AI_WORKER_HTTP_CALLBACK", False)))

@@ -23,7 +23,8 @@ func NewApp() *App {
 }
 
 func NewAppWithConfig(config Config) *App {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	initTimeout := time.Duration(envInt("DB_INIT_TIMEOUT_SECONDS", 120)) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
 	defer cancel()
 
 	store, err := OpenStore(ctx, config)
@@ -76,9 +77,20 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("GET /api/analytics/export/scores.csv", app.handleExportScores)
 	mux.HandleFunc("GET /api/mistakes", app.handleWrongQuestions)
 	mux.HandleFunc("GET /api/mistakes/{mistakeID}", app.handleWrongQuestion)
+	mux.HandleFunc("PATCH /api/mistakes/{mistakeID}/knowledge-points", app.handleWrongQuestionKnowledge)
 	mux.HandleFunc("POST /api/mistakes/repractice", app.handleCreateRepracticeTask)
 	mux.HandleFunc("GET /api/learning/profile", app.handleLearningProfile)
 	mux.HandleFunc("GET /api/reports/guardian", app.handleGuardianReport)
+	mux.HandleFunc("GET /api/knowledge-points", app.handleKnowledgePoints)
+	mux.HandleFunc("POST /api/knowledge-points", app.handleCreateKnowledgePoint)
+	mux.HandleFunc("GET /api/question-bank", app.handleQuestionBank)
+	mux.HandleFunc("POST /api/question-bank", app.handleCreateQuestionBankItem)
+	mux.HandleFunc("GET /api/paper-compositions", app.handlePaperCompositions)
+	mux.HandleFunc("POST /api/paper-compositions", app.handleCreatePaperComposition)
+	mux.HandleFunc("POST /api/paper-compositions/{compositionID}/ai-compose-request", app.handleAIComposeRequest)
+	mux.HandleFunc("POST /api/paper-analysis/blank-paper-uploads", app.handleBlankPaperUpload)
+	mux.HandleFunc("POST /api/answer-sheets/uploads", app.handleAnswerSheetUpload)
+	mux.HandleFunc("POST /api/grading/tasks", app.handleCreateGradingTask)
 	mux.HandleFunc("GET /api/organization/graph", app.handleOrganizationGraph)
 	mux.HandleFunc("POST /api/organization/{kind}", app.handleOrganizationCreate)
 	mux.HandleFunc("POST /api/guardian/invitations", app.handleGuardianInvitation)
@@ -88,6 +100,10 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("GET /api/portal/student", app.handleStudentPortal)
 	mux.HandleFunc("GET /api/portal/guardian", app.handleGuardianPortal)
 	mux.HandleFunc("POST /api/ai/capabilities/{capability}/requests", app.handleAICapabilityRequest)
+	mux.HandleFunc("GET /api/ai/tasks", app.handleAITasks)
+	mux.HandleFunc("GET /api/ai/tasks/{taskID}", app.handleAITask)
+	mux.HandleFunc("POST /api/ai/tasks/{taskID}/dispatch", app.handleDispatchAITask)
+	mux.HandleFunc("POST /api/ai/tasks/{taskID}/callback", app.handleAITaskCallback)
 	mux.HandleFunc("GET /api/dev/connections", app.handleDevConnections)
 	mux.HandleFunc("POST /api/dev/reset-demo", app.handleResetDemo)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(localUploadRoot()))))
@@ -197,10 +213,15 @@ func (app *App) handleCreateScanTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Title = strings.TrimSpace(req.Title)
 	req.ClassName = strings.TrimSpace(req.ClassName)
+	req.ScanType = normalizeScanType(req.ScanType)
 	req.TemplateID = strings.TrimSpace(req.TemplateID)
 	req.Notes = strings.TrimSpace(req.Notes)
-	if req.Title == "" || req.ClassName == "" || req.TemplateID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title, className and templateId are required"})
+	if req.Title == "" || req.ClassName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title and className are required"})
+		return
+	}
+	if req.ScanType == "answer_sheet" && req.TemplateID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "answer sheet scan must bind a template"})
 		return
 	}
 	if req.Pages <= 0 {
@@ -211,21 +232,25 @@ func (app *App) handleCreateScanTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "files are required"})
 		return
 	}
-	template, err := app.store.Template(r.Context(), req.TemplateID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+	var template PaperTemplate
+	if req.TemplateID != "" {
+		var err error
+		template, err = app.store.Template(r.Context(), req.TemplateID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+				return
+			}
+			log.Printf("scan task template query failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template query failed"})
 			return
 		}
-		log.Printf("scan task template query failed: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template query failed"})
-		return
+		if template.Status != "published" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "scan task must bind a published template"})
+			return
+		}
+		req.TemplateVersion = template.Version
 	}
-	if template.Status != "published" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "scan task must bind a published template"})
-		return
-	}
-	req.TemplateVersion = template.Version
 	task, err := app.store.CreateScanTask(r.Context(), req)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -387,9 +412,13 @@ func (app *App) handleRetryScanTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan task retry failed"})
 		return
 	}
-	template, err := app.store.Template(r.Context(), task.TemplateID)
-	if err != nil {
-		log.Printf("scan task retry template query failed: %v", err)
+	var template PaperTemplate
+	if task.TemplateID != "" {
+		var err error
+		template, err = app.store.Template(r.Context(), task.TemplateID)
+		if err != nil {
+			log.Printf("scan task retry template query failed: %v", err)
+		}
 	}
 	queueTask := task
 	if req.FileKey != "" {

@@ -121,12 +121,14 @@ func scanQueuePayload(task ScanJob, template PaperTemplate) ScanQueuePayload {
 	}
 	return ScanQueuePayload{
 		TaskID:          task.ID,
+		ScanType:        normalizeScanType(task.ScanType),
 		Title:           task.Title,
 		ClassName:       task.ClassName,
 		TemplateID:      task.TemplateID,
 		TemplateVersion: templateVersion,
 		Pages:           task.Pages,
 		FileKeys:        fileKeys,
+		Files:           task.Files,
 		CreatedAt:       time.Now().Format(time.RFC3339),
 	}
 }

@@ -28,3 +28,11 @@ obs:
   secretAccessKey: ""
   bucket: ""
   region: ""
+
+aiProvider:
+  # 通用第三方 AI HTTP 任务入口。可配置为厂商提供的完整任务接收 URL。
+  name: generic-http
+  baseUrl: ""
+  apiKey: ""
+  timeoutSeconds: 30
+  callbackSecret: ""

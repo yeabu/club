@@ -119,6 +119,13 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		column     string
 		definition string
 	}{
+		{table: "users", column: "school_id", definition: "VARCHAR(40) NOT NULL DEFAULT '' AFTER id"},
+		{table: "users", column: "email", definition: "VARCHAR(120) DEFAULT '' AFTER mobile"},
+		{table: "users", column: "status", definition: "VARCHAR(30) NOT NULL DEFAULT 'active' AFTER email"},
+		{table: "knowledge_points", column: "school_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
+		{table: "knowledge_points", column: "grade_id", definition: "VARCHAR(40) DEFAULT '' AFTER school_id"},
+		{table: "knowledge_points", column: "subject_id", definition: "VARCHAR(40) DEFAULT '' AFTER grade_id"},
+		{table: "knowledge_points", column: "code", definition: "VARCHAR(80) DEFAULT '' AFTER parent_id"},
 		{table: "paper_templates", column: "version", definition: "INT NOT NULL DEFAULT 1"},
 		{table: "paper_templates", column: "parent_id", definition: "VARCHAR(40) DEFAULT ''"},
 		{table: "paper_templates", column: "source_file_url", definition: "VARCHAR(255) DEFAULT ''"},
@@ -137,6 +144,7 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "assignments", column: "published_at", definition: "DATETIME NULL AFTER teacher_id"},
 		{table: "assignments", column: "completed_at", definition: "DATETIME NULL AFTER due_at"},
 		{table: "scan_jobs", column: "assignment_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
+		{table: "scan_jobs", column: "scan_type", definition: "VARCHAR(30) NOT NULL DEFAULT 'answer_sheet' AFTER assignment_id"},
 		{table: "scan_jobs", column: "template_id", definition: "VARCHAR(40) DEFAULT '' AFTER class_name"},
 		{table: "scan_jobs", column: "template_version", definition: "INT NOT NULL DEFAULT 1 AFTER template_id"},
 		{table: "scan_jobs", column: "created_by", definition: "VARCHAR(40) DEFAULT '' AFTER template_version"},
@@ -161,6 +169,7 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "grading_history", column: "model_version", definition: "VARCHAR(80) DEFAULT '' AFTER review_stage"},
 		{table: "wrong_questions", column: "submission_id", definition: "VARCHAR(40) DEFAULT '' AFTER question_id"},
 		{table: "wrong_questions", column: "question_no", definition: "VARCHAR(20) DEFAULT '' AFTER submission_id"},
+		{table: "wrong_questions", column: "knowledge_point_id", definition: "VARCHAR(40) DEFAULT '' AFTER question_no"},
 		{table: "wrong_questions", column: "error_type", definition: "VARCHAR(40) NOT NULL DEFAULT 'other' AFTER knowledge_point"},
 		{table: "wrong_questions", column: "original_question", definition: "TEXT AFTER source_paper"},
 		{table: "wrong_questions", column: "score", definition: "DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER source_paper"},
@@ -248,7 +257,7 @@ func (s *Store) Dashboard(ctx context.Context) (DashboardResponse, error) {
 
 func (s *Store) ScanJobs(ctx context.Context) ([]ScanJob, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
+		SELECT id, scan_type, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
 			status, progress, COALESCE(failure_reason, ''), retry_count, queue_status, COALESCE(queue_message, '')
 		FROM scan_jobs
 		ORDER BY created_at DESC
@@ -263,7 +272,7 @@ func (s *Store) ScanJobs(ctx context.Context) ([]ScanJob, error) {
 		var job ScanJob
 		var filesJSON string
 		if err := rows.Scan(
-			&job.ID, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
+			&job.ID, &job.ScanType, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
 			&job.Status, &job.Progress, &job.FailureReason, &job.RetryCount, &job.QueueStatus, &job.QueueMessage,
 		); err != nil {
 			return nil, err
@@ -278,12 +287,12 @@ func (s *Store) ScanTask(ctx context.Context, taskID string) (ScanJob, error) {
 	var job ScanJob
 	var filesJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
+		SELECT id, scan_type, title, class_name, template_id, template_version, pages, COALESCE(notes, ''), COALESCE(files_json, JSON_ARRAY()),
 			status, progress, COALESCE(failure_reason, ''), retry_count, queue_status, COALESCE(queue_message, '')
 		FROM scan_jobs
 		WHERE id = ?
-		LIMIT 1`, taskID).Scan(
-		&job.ID, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
+	LIMIT 1`, taskID).Scan(
+		&job.ID, &job.ScanType, &job.Title, &job.ClassName, &job.TemplateID, &job.TemplateVersion, &job.Pages, &job.Notes, &filesJSON,
 		&job.Status, &job.Progress, &job.FailureReason, &job.RetryCount, &job.QueueStatus, &job.QueueMessage,
 	)
 	if err != nil {
@@ -294,6 +303,7 @@ func (s *Store) ScanTask(ctx context.Context, taskID string) (ScanJob, error) {
 }
 
 func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJob, error) {
+	req.ScanType = normalizeScanType(req.ScanType)
 	templateVersion := req.TemplateVersion
 	if req.TemplateID != "" {
 		template, err := s.Template(ctx, req.TemplateID)
@@ -312,6 +322,7 @@ func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJo
 	}
 	job := ScanJob{
 		ID:              fmt.Sprintf("scan_%d", time.Now().UnixNano()),
+		ScanType:        req.ScanType,
 		Title:           req.Title,
 		ClassName:       req.ClassName,
 		TemplateID:      req.TemplateID,
@@ -325,9 +336,9 @@ func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJo
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scan_jobs
-			(id, title, class_name, template_id, template_version, pages, notes, files_json, status, progress, failure_reason, retry_count, queue_status, queue_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, '')`,
-		job.ID, job.Title, job.ClassName, job.TemplateID, job.TemplateVersion, job.Pages, job.Notes, string(filesJSON), job.Status, job.Progress, job.QueueStatus,
+			(id, scan_type, title, class_name, template_id, template_version, pages, notes, files_json, status, progress, failure_reason, retry_count, queue_status, queue_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, '')`,
+		job.ID, job.ScanType, job.Title, job.ClassName, job.TemplateID, job.TemplateVersion, job.Pages, job.Notes, string(filesJSON), job.Status, job.Progress, job.QueueStatus,
 	)
 	if err != nil {
 		return ScanJob{}, err

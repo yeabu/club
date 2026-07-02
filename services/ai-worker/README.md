@@ -43,7 +43,31 @@ python3 -m app.main --redis-ping
 - `API_BASE_URL`：Go API 地址，默认 `http://localhost:8080`
 - `AI_WORKER_RESULT_DIR`：本地结果落盘目录，默认 `var/ai-worker/results`
 - `AI_MODEL_VERSION`：日志和回写中的模型版本
+- `AI_PROVIDER`：大模型厂商，当前支持 `anthropic` / `anthropic-compatible` / `deepseek` / `mock`
+- `ANTHROPIC_BASE_URL`：Anthropic Messages 兼容接口地址，例如 `https://api.deepseek.com/anthropic`
+- `ANTHROPIC_AUTH_TOKEN`：Anthropic Messages 兼容接口密钥
+- `ANTHROPIC_MODEL`：模型名称，例如 `deepseek-v4-pro`
+- `AI_TIMEOUT_SECONDS`：大模型 HTTP 调用超时，默认 `45`
+- `PADDLEOCR_SERVICE_URL`：远程 PaddleOCR HTTP 服务地址，例如 `http://192.168.0.213:8100`
 - `AI_WORKER_USE_PADDLEOCR`：设为 `true` 时优先尝试 PaddleOCR，失败回退 mock OCR
+
+OCR 优先级：
+
+1. 设置 `PADDLEOCR_SERVICE_URL` 时，优先调用远程 PaddleOCR HTTP 服务。
+2. 未设置远程服务且 `AI_WORKER_USE_PADDLEOCR=true` 时，尝试本进程加载 PaddleOCR。
+3. 以上不可用时回退到稳定 mock OCR，保证队列消费链路不中断。
+
+AI Provider 优先级：
+
+1. 设置 `ANTHROPIC_AUTH_TOKEN` 且 `AI_PROVIDER` 为空、`anthropic`、`anthropic-compatible` 或 `deepseek` 时，调用 Anthropic Messages 兼容接口。
+2. 未设置三方接口密钥时，使用本地 mock AI，保证开发和单测不依赖外网。
+3. 三方接口返回异常或非 JSON 时，会记录 `ai_provider_failed` 日志并回退 mock 结果，扫描链路不中断。
+
+当前三方 AI 任务覆盖：
+
+- `POST /ai/paper/analyze`：试卷解析并生成答题卡题区建议
+- `POST /ai/grading/subjective`：主观题建议分、理由和证据
+- `POST /ai/wrong-reason`：错因归类和训练建议
 
 ## Endpoints
 

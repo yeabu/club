@@ -114,6 +114,19 @@ var schemaStatements = []string{
 		UNIQUE KEY uk_subjects_school_name (school_id, name),
 		INDEX idx_subjects_school (school_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS class_subjects (
+		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) NOT NULL,
+		grade_id VARCHAR(40) NOT NULL,
+		class_id VARCHAR(40) NOT NULL,
+		subject_id VARCHAR(40) NOT NULL,
+		teacher_id VARCHAR(40) DEFAULT '',
+		status VARCHAR(30) NOT NULL DEFAULT 'active',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_class_subject (class_id, subject_id),
+		INDEX idx_class_subjects_school (school_id, grade_id),
+		INDEX idx_class_subjects_teacher (teacher_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS teacher_grades (
 		teacher_id VARCHAR(40) NOT NULL,
 		grade_id VARCHAR(40) NOT NULL,
@@ -165,11 +178,86 @@ var schemaStatements = []string{
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS knowledge_points (
 		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) DEFAULT '',
+		grade_id VARCHAR(40) DEFAULT '',
+		subject_id VARCHAR(40) DEFAULT '',
 		name VARCHAR(100) NOT NULL,
 		subject VARCHAR(40) NOT NULL,
 		parent_id VARCHAR(40) NULL,
+		code VARCHAR(80) DEFAULT '',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_knowledge_name_subject (name, subject)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS question_bank (
+		id VARCHAR(40) PRIMARY KEY,
+		school_id VARCHAR(40) DEFAULT '',
+		grade_id VARCHAR(40) DEFAULT '',
+		subject_id VARCHAR(40) DEFAULT '',
+		subject VARCHAR(40) NOT NULL,
+		question_type VARCHAR(40) NOT NULL,
+		difficulty VARCHAR(40) NOT NULL DEFAULT 'medium',
+		content TEXT NOT NULL,
+		answer TEXT,
+		analysis TEXT,
+		source VARCHAR(40) NOT NULL DEFAULT 'manual',
+		status VARCHAR(30) NOT NULL DEFAULT 'active',
+		created_by VARCHAR(40) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		INDEX idx_question_bank_subject_grade (subject, grade_id),
+		INDEX idx_question_bank_type_difficulty (question_type, difficulty)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS question_bank_knowledge_points (
+		question_id VARCHAR(40) NOT NULL,
+		knowledge_point_id VARCHAR(40) NOT NULL,
+		knowledge_point_name VARCHAR(100) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (question_id, knowledge_point_id),
+		INDEX idx_question_bank_knowledge (knowledge_point_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS paper_compositions (
+		id VARCHAR(40) PRIMARY KEY,
+		title VARCHAR(120) NOT NULL,
+		school_id VARCHAR(40) DEFAULT '',
+		grade_id VARCHAR(40) DEFAULT '',
+		grade_name VARCHAR(80) DEFAULT '',
+		subject_id VARCHAR(40) DEFAULT '',
+		subject VARCHAR(40) NOT NULL,
+		mode VARCHAR(40) NOT NULL DEFAULT 'manual',
+		status VARCHAR(30) NOT NULL DEFAULT 'draft',
+		question_count INT NOT NULL DEFAULT 0,
+		total_score DECIMAL(8,2) NOT NULL DEFAULT 0,
+		created_by VARCHAR(40) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		INDEX idx_paper_compositions_subject (subject, grade_id, status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS paper_composition_questions (
+		composition_id VARCHAR(40) NOT NULL,
+		question_id VARCHAR(40) NOT NULL,
+		sort_order INT NOT NULL DEFAULT 0,
+		score DECIMAL(6,2) NOT NULL DEFAULT 0,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (composition_id, question_id),
+		INDEX idx_composition_questions_question (question_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS ai_tasks (
+		id VARCHAR(40) PRIMARY KEY,
+		task_type VARCHAR(60) NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'pending',
+		provider VARCHAR(80) DEFAULT 'third_party_reserved',
+		request_json JSON NOT NULL,
+		result_json JSON NULL,
+		source_object_key VARCHAR(255) DEFAULT '',
+		source_url VARCHAR(255) DEFAULT '',
+		owner_type VARCHAR(40) DEFAULT '',
+		owner_id VARCHAR(40) DEFAULT '',
+		created_by VARCHAR(40) DEFAULT '',
+		error_message VARCHAR(255) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		INDEX idx_ai_tasks_owner (owner_type, owner_id),
+		INDEX idx_ai_tasks_type_status (task_type, status)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS question_types (
 		id VARCHAR(40) PRIMARY KEY,
@@ -255,6 +343,7 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS scan_jobs (
 		id VARCHAR(40) PRIMARY KEY,
 		assignment_id VARCHAR(40) DEFAULT '',
+		scan_type VARCHAR(30) NOT NULL DEFAULT 'answer_sheet',
 		title VARCHAR(120) NOT NULL,
 		class_name VARCHAR(100) NOT NULL,
 		template_id VARCHAR(40) DEFAULT '',
@@ -432,6 +521,7 @@ var schemaStatements = []string{
 		question_id VARCHAR(40) NOT NULL,
 		submission_id VARCHAR(40) DEFAULT '',
 		question_no VARCHAR(20) DEFAULT '',
+		knowledge_point_id VARCHAR(40) DEFAULT '',
 		knowledge_point VARCHAR(100) NOT NULL,
 		error_type VARCHAR(40) NOT NULL DEFAULT 'other',
 		wrong_reason VARCHAR(255) NOT NULL,
@@ -451,6 +541,14 @@ var schemaStatements = []string{
 		UNIQUE KEY uk_wrong_question_submission_question (submission_id, question_id),
 		INDEX idx_wrong_student (student_id),
 		INDEX idx_wrong_knowledge (knowledge_point)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS wrong_question_knowledge_points (
+		wrong_question_id BIGINT NOT NULL,
+		knowledge_point_id VARCHAR(40) NOT NULL,
+		knowledge_point_name VARCHAR(100) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (wrong_question_id, knowledge_point_id),
+		INDEX idx_wrong_question_knowledge (knowledge_point_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS repractice_tasks (
 		id VARCHAR(40) PRIMARY KEY,
@@ -490,6 +588,19 @@ var schemaStatements = []string{
 		UNIQUE KEY uk_object_files_key (object_key),
 		INDEX idx_object_files_owner (owner_type, owner_id),
 		INDEX idx_object_files_purpose (purpose)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS answer_sheet_uploads (
+		id VARCHAR(40) PRIMARY KEY,
+		composition_id VARCHAR(40) DEFAULT '',
+		student_id VARCHAR(40) DEFAULT '',
+		student_name VARCHAR(80) DEFAULT '',
+		object_key VARCHAR(255) NOT NULL,
+		url VARCHAR(255) NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'uploaded',
+		grading_task_id VARCHAR(40) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_answer_sheet_composition (composition_id),
+		INDEX idx_answer_sheet_student (student_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS exam_scores (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -567,6 +678,8 @@ var seedStatements = []string{
 		('subject_math', 'school_001', '数学', 'math'),
 		('subject_chinese', 'school_001', '语文', 'chinese'),
 		('subject_english', 'school_001', '英语', 'english')`,
+	`INSERT IGNORE INTO class_subjects (id, school_id, grade_id, class_id, subject_id, teacher_id) VALUES
+		('course_603_math', 'school_001', 'grade_6', 'class_603', 'subject_math', 'teacher_001')`,
 	`INSERT IGNORE INTO teacher_grades (teacher_id, grade_id) VALUES ('teacher_001', 'grade_6')`,
 	`INSERT IGNORE INTO teacher_subjects (teacher_id, subject_id) VALUES ('teacher_001', 'subject_math')`,
 	`INSERT IGNORE INTO guardians (id, user_id, name, mobile, relationship) VALUES
@@ -579,12 +692,15 @@ var seedStatements = []string{
 		('stu_003', 'user_stu_003', 'class_603', '60303', '赵六', '赵六家长')`,
 	`INSERT IGNORE INTO student_guardians (student_id, guardian_id, relationship, is_primary) VALUES
 		('stu_001', 'guardian_001', 'parent', TRUE),
+		('stu_002', 'guardian_001', 'parent', FALSE),
 		('stu_002', 'guardian_002', 'parent', TRUE),
 		('stu_003', 'guardian_003', 'parent', TRUE)`,
-	`INSERT IGNORE INTO knowledge_points (id, name, subject) VALUES
-		('kp_001', '分数应用题', '数学'),
-		('kp_002', '几何面积', '数学'),
-		('kp_003', '比例换算', '数学')`,
+	`INSERT IGNORE INTO knowledge_points (id, school_id, grade_id, subject_id, name, subject, code) VALUES
+		('kp_001', 'school_001', 'grade_6', 'subject_math', '分数应用题', '数学', 'math_fraction_application'),
+		('kp_002', 'school_001', 'grade_6', 'subject_math', '几何面积', '数学', 'math_geometry_area'),
+		('kp_003', 'school_001', 'grade_6', 'subject_math', '比例换算', '数学', 'math_ratio_conversion'),
+		('kp_004', 'school_001', 'grade_6', 'subject_math', '比例', '数学', 'math_ratio'),
+		('kp_005', 'school_001', 'grade_6', 'subject_math', '分数', '数学', 'math_fraction')`,
 	`INSERT IGNORE INTO question_types (id, name, mode, default_score, auto_gradable) VALUES
 		('qt_single_choice', 'single_choice', 'objective', 2, TRUE),
 		('qt_fill_blank', 'fill_blank', 'objective', 3, TRUE),
@@ -617,16 +733,27 @@ var seedStatements = []string{
 			y = VALUES(y),
 			width = VALUES(width),
 			height = VALUES(height)`,
+	`INSERT IGNORE INTO question_bank
+		(id, school_id, grade_id, subject_id, subject, question_type, difficulty, content, answer, analysis, source, created_by)
+	VALUES
+		('qb_001', 'school_001', 'grade_6', 'subject_math', '数学', 'single_choice', 'easy', '比较 3/5 和 4/7 的大小，选择正确答案。A. 3/5 > 4/7 B. 3/5 < 4/7 C. 相等 D. 无法比较', 'A', '通分后比较，3/5=21/35，4/7=20/35。', 'template_split', 'teacher_001'),
+		('qb_002', 'school_001', 'grade_6', 'subject_math', '数学', 'subjective', 'medium', '一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？', '100 千克', '剩余为 2/5，对应 40 千克，所以总量为 40 ÷ 2/5 = 100。', 'manual', 'teacher_001'),
+		('qb_003', 'school_001', 'grade_6', 'subject_math', '数学', 'subjective', 'medium', '将组合图形拆成长方形和三角形后，计算总面积。', '按图形数据分别计算后相加。', '关键是标出拆分依据、公式和单位。', 'template_split', 'teacher_001')`,
+	`INSERT IGNORE INTO question_bank_knowledge_points (question_id, knowledge_point_id, knowledge_point_name) VALUES
+		('qb_001', 'kp_005', '分数'),
+		('qb_002', 'kp_001', '分数应用题'),
+		('qb_002', 'kp_004', '比例'),
+		('qb_003', 'kp_002', '几何面积')`,
 	`INSERT IGNORE INTO exams (id, school_id, name, subject, grade, template_id, template_version, status, started_at, ended_at) VALUES
 		('exam_001', 'school_001', '六年级数学期中卷', '数学', '六年级', 'tpl_001', 1, 'published', NOW(), NOW() + INTERVAL 1 DAY)`,
 	`INSERT IGNORE INTO assignments (id, exam_id, title, kind, class_id, class_name, template_id, template_version, teacher_id, published_at, due_at, status) VALUES
 		('assign_001', 'exam_001', '六年级数学期中卷', 'exam', 'class_603', '六年级 3 班', 'tpl_001', 1, 'teacher_001', NOW(), NOW() + INTERVAL 1 DAY, 'open')`,
 	`INSERT IGNORE INTO assignment_classes (assignment_id, class_id, class_name, publish_status) VALUES
 		('assign_001', 'class_603', '六年级 3 班', 'published')`,
-	`INSERT INTO scan_jobs (id, title, class_name, template_id, template_version, pages, status, progress) VALUES
-		('scan_001', '六年级数学期中卷', '六年级 3 班', 'tpl_001', 1, 96, 'OCR 识别中', 68),
-		('scan_002', '分数应用题专项', '六年级 1 班', 'tpl_001', 1, 42, '等待 OMR', 32),
-		('scan_003', '几何面积小测', '五年级 2 班', 'tpl_001', 1, 48, '待导入', 0)
+	`INSERT INTO scan_jobs (id, scan_type, title, class_name, template_id, template_version, pages, status, progress) VALUES
+		('scan_001', 'answer_sheet', '六年级数学期中卷', '六年级 3 班', 'tpl_001', 1, 96, 'OCR 识别中', 68),
+		('scan_002', 'answer_sheet', '分数应用题专项', '六年级 1 班', 'tpl_001', 1, 42, '等待 OMR', 32),
+		('scan_003', 'paper', '几何面积小测空白试卷', '五年级 2 班', '', 1, 48, '试卷已导入', 100)
 		ON DUPLICATE KEY UPDATE
 			template_id = VALUES(template_id),
 			template_version = VALUES(template_version)`,
@@ -653,6 +780,11 @@ var seedStatements = []string{
 		('stu_002', 'q_001', 'sub_002', '1', '分数', 'concept', '标准答案为 A，学生选择 B', '六年级数学期中卷', '比较两个分数的大小，选择正确答案。', 0, 2, 'A', 'B', '/mock/student-answer-q18.png', '回顾分数大小比较方法。', 'pending', 'not_assigned'),
 		('stu_001', 'q_015', 'sub_001', '15', '比例', 'expression', '比例关系书写不规范', '六年级数学期中卷', '根据比例关系解决实际问题。', 8, 10, '设未知数并列比例求解，结果为 24 千克。', '3/5 = x/40，x = 24。', '/mock/student-answer-q15.png', '建模正确，补充规范比例式和单位说明。', 'pending', 'not_assigned'),
 		('stu_002', 'q_018', 'sub_002', '18', '几何面积', 'calculation', '图形拆分后面积计算不完整', '六年级数学期中卷', '将组合图形拆分后计算总面积。', 6, 8, '长方形与三角形面积相加。', '长方形面积 36，三角形面积 12。', '/mock/student-answer-q18.png', '标出拆分依据并写完整单位。', 'pending', 'not_assigned')`,
+	`UPDATE wrong_questions wq JOIN knowledge_points kp ON kp.name = wq.knowledge_point AND kp.subject = '数学' SET wq.knowledge_point_id = kp.id WHERE wq.knowledge_point_id = ''`,
+	`INSERT IGNORE INTO wrong_question_knowledge_points (wrong_question_id, knowledge_point_id, knowledge_point_name)
+		SELECT wq.id, kp.id, kp.name
+		FROM wrong_questions wq
+		JOIN knowledge_points kp ON kp.name = wq.knowledge_point AND kp.subject = '数学'`,
 	`INSERT IGNORE INTO knowledge_mastery_history (class_name, student_id, knowledge_point, mastery, wrong_count, student_count, recorded_at) VALUES
 		('六年级 3 班', '', '分数应用题', 38, 32, 18, '2026-05-01'),
 		('六年级 3 班', '', '分数应用题', 42, 29, 16, '2026-06-01'),

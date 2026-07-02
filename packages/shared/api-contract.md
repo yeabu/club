@@ -37,9 +37,20 @@
 - `GET /api/analytics/export/scores.csv`
 - `GET /api/mistakes`
 - `GET /api/mistakes/{mistakeID}`
+- `PATCH /api/mistakes/{mistakeID}/knowledge-points`
 - `POST /api/mistakes/repractice`
 - `GET /api/learning/profile`
 - `GET /api/reports/guardian`
+- `GET /api/knowledge-points`
+- `POST /api/knowledge-points`
+- `GET /api/question-bank`
+- `POST /api/question-bank`
+- `GET /api/paper-compositions`
+- `POST /api/paper-compositions`
+- `POST /api/paper-compositions/{compositionID}/ai-compose-request`
+- `POST /api/paper-analysis/blank-paper-uploads`
+- `POST /api/answer-sheets/uploads`
+- `POST /api/grading/tasks`
 - `GET /api/organization/graph`
 - `POST /api/organization/{kind}` (`schools|grades|subjects|classes|teachers|students`)
 - `POST /api/guardian/invitations`
@@ -593,9 +604,399 @@ Single-region mutation response:
 }
 ```
 
+`PATCH /api/mistakes/{mistakeID}/knowledge-points` rebinds one wrong-question record to stable knowledge point ids. The legacy `wrong_questions.knowledge_point` text field is still updated for compatibility, while `wrong_question_knowledge_points` stores the normalized relation.
+
+```json
+{
+  "knowledgePointIds": ["kp_001", "kp_004"]
+}
+```
+
+## Question Bank And Knowledge Points
+
+Phase 3 introduces an independent question bank. `question_templates` remain bound to paper templates; `question_bank` is the reusable source for future manual and AI-assisted paper composition.
+
+`GET /api/knowledge-points?subject=数学&gradeId=grade_6&search=比例` returns normalized knowledge tags.
+
+```json
+{
+  "items": [
+    {
+      "id": "kp_004",
+      "schoolId": "school_001",
+      "gradeId": "grade_6",
+      "subjectId": "subject_math",
+      "name": "比例",
+      "subject": "数学",
+      "code": "math_ratio"
+    }
+  ],
+  "counts": {
+    "knowledgePoints": 1
+  }
+}
+```
+
+`POST /api/knowledge-points` creates a knowledge tag.
+
+```json
+{
+  "schoolId": "school_001",
+  "gradeId": "grade_6",
+  "subjectId": "subject_math",
+  "name": "圆柱体积",
+  "subject": "数学",
+  "code": "math_cylinder_volume"
+}
+```
+
+`GET /api/question-bank` supports `subject`, `gradeId`, `knowledge`, `type`, `difficulty`, and `search` filters. `knowledge` may be either a knowledge point id or name.
+
+```json
+{
+  "items": [
+    {
+      "id": "qb_002",
+      "schoolId": "school_001",
+      "gradeId": "grade_6",
+      "subjectId": "subject_math",
+      "subject": "数学",
+      "questionType": "subjective",
+      "difficulty": "medium",
+      "content": "一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？",
+      "answer": "100 千克",
+      "analysis": "剩余为 2/5，对应 40 千克，所以总量为 40 ÷ 2/5 = 100。",
+      "source": "manual",
+      "status": "active",
+      "knowledge": [
+        { "id": "kp_001", "name": "分数应用题", "subject": "数学" },
+        { "id": "kp_004", "name": "比例", "subject": "数学" }
+      ],
+      "linkedMistakes": 1
+    }
+  ],
+  "counts": {
+    "questions": 1,
+    "knowledgePoints": 5,
+    "linkedMistakes": 3
+  }
+}
+```
+
+`POST /api/question-bank` creates a reusable question and links it to at least one knowledge point. The request can use existing `knowledgePointIds` or plain `knowledgePoints`; missing names are created automatically under the supplied subject.
+
+```json
+{
+  "schoolId": "school_001",
+  "gradeId": "grade_6",
+  "subjectId": "subject_math",
+  "subject": "数学",
+  "questionType": "subjective",
+  "difficulty": "medium",
+  "content": "一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？",
+  "answer": "100 千克",
+  "analysis": "剩余为 2/5，对应 40 千克。",
+  "source": "manual",
+  "createdBy": "teacher_001",
+  "knowledgePoints": ["分数应用题", "比例"]
+}
+```
+
+## Paper Composition And Grading Flow
+
+Phase 4 adds the teacher-facing paper composition and grading workflow foundation. AI-related endpoints create `ai_tasks` records with `provider=third_party_reserved` and `status=pending`. Phase 5 adds a separate third-party AI dispatch layer; creating a task still does not call a model provider until the task is explicitly dispatched.
+
+`GET /api/paper-compositions` lists manual paper drafts and their selected question-bank items.
+
+```json
+{
+  "items": [
+    {
+      "id": "paper_178...",
+      "title": "分数与比例专项练习",
+      "gradeId": "grade_6",
+      "gradeName": "六年级",
+      "subjectId": "subject_math",
+      "subject": "数学",
+      "mode": "manual",
+      "status": "draft",
+      "questionCount": 2,
+      "totalScore": 10,
+      "questions": [
+        {
+          "id": "qb_002",
+          "content": "一桶油用去 3/5 后还剩 40 千克，这桶油原来有多少千克？",
+          "sortOrder": 1,
+          "score": 5
+        }
+      ]
+    }
+  ],
+  "counts": { "compositions": 1 }
+}
+```
+
+`POST /api/paper-compositions` saves a manual paper draft from selected question-bank ids.
+
+```json
+{
+  "title": "分数与比例专项练习",
+  "schoolId": "school_001",
+  "gradeId": "grade_6",
+  "gradeName": "六年级",
+  "subjectId": "subject_math",
+  "subject": "数学",
+  "createdBy": "teacher_001",
+  "questionIds": ["qb_001", "qb_002"],
+  "scores": { "qb_001": 2, "qb_002": 8 }
+}
+```
+
+`POST /api/paper-compositions/{compositionID}/ai-compose-request` creates a reserved third-party AI paper-composition task. The request can include target knowledge points, difficulty, question count, and teacher id.
+
+```json
+{
+  "createdBy": "teacher_001",
+  "knowledgePointIds": ["kp_001", "kp_004"],
+  "difficulty": "medium",
+  "phase": "reserved"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "aitask_178...",
+  "taskType": "ai_paper_composition",
+  "status": "pending",
+  "provider": "third_party_reserved",
+  "message": "第三方 AI 任务已创建，等待人工或调度器派发"
+}
+```
+
+`POST /api/paper-analysis/blank-paper-uploads` uploads one or more blank paper files and creates reserved `paper_template_analysis` tasks. Files use the same validation and OBS/local storage path as scan uploads. The endpoint stores object metadata with purpose `blank_paper`.
+
+Multipart fields:
+
+- `files`: PDF/PNG/JPG/WebP/ZIP
+- `compositionId`: optional paper draft id
+- `createdBy`: teacher id
+
+`POST /api/answer-sheets/uploads` uploads student answer sheets, stores object metadata with purpose `student_answer`, records `answer_sheet_uploads`, and creates reserved upload/grading-related task records.
+
+Multipart fields:
+
+- `files`: PDF/PNG/JPG/WebP/ZIP
+- `compositionId`: paper draft id
+- `studentId`: optional student id
+- `studentName`: student display name
+- `createdBy`: teacher id
+
+`POST /api/grading/tasks` creates a pending grading task. `mode=standard_answer` reserves standard-answer comparison; `mode=ai` reserves third-party AI grading. Neither mode performs real grading during task creation.
+
+```json
+{
+  "compositionId": "paper_178...",
+  "mode": "ai",
+  "createdBy": "teacher_001",
+  "phase": "reserved"
+}
+```
+
+## Third-party AI Task Dispatch
+
+Phase 5 uses a generic HTTP adapter for third-party AI. The platform does not hardcode a model vendor and does not self-host AI. Provider configuration can be supplied through YAML or environment variables:
+
+```yaml
+aiProvider:
+  name: generic-http
+  baseUrl: https://provider.example.com/tasks
+  apiKey: ""
+  timeoutSeconds: 30
+  callbackSecret: ""
+```
+
+Equivalent environment variables:
+
+- `AI_PROVIDER_NAME`
+- `AI_PROVIDER_BASE_URL`
+- `AI_PROVIDER_API_KEY`
+- `AI_PROVIDER_TIMEOUT_SECONDS`
+- `AI_PROVIDER_CALLBACK_SECRET`
+
+`GET /health` exposes only safe provider metadata:
+
+```json
+{
+  "config": {
+    "aiProvider": {
+      "name": "generic-http",
+      "baseUrl": "https://provider.example.com/tasks",
+      "timeoutSeconds": 30,
+      "apiKeyProvided": true,
+      "callbackSecretProvided": true,
+      "configured": true
+    }
+  }
+}
+```
+
+`GET /api/ai/tasks?status=pending&taskType=ai_grading` lists the latest AI task records.
+
+```json
+{
+  "items": [
+    {
+      "id": "aitask_178...",
+      "taskType": "ai_grading",
+      "status": "pending",
+      "provider": "third_party_reserved",
+      "request": { "compositionId": "paper_178..." },
+      "ownerType": "paper_composition",
+      "ownerId": "paper_178...",
+      "message": "第三方 AI 任务已创建，等待人工或调度器派发"
+    }
+  ],
+  "counts": { "tasks": 1 }
+}
+```
+
+`POST /api/ai/tasks/{taskID}/dispatch` sends the task to `aiProvider.baseUrl` when `baseUrl` and `apiKey` are configured. The outbound request uses `Authorization: Bearer {apiKey}` and this JSON shape:
+
+```json
+{
+  "taskId": "aitask_178...",
+  "taskType": "ai_grading",
+  "request": { "compositionId": "paper_178..." },
+  "sourceObjectKey": "uploads/...",
+  "sourceUrl": "/uploads/...",
+  "ownerType": "paper_composition",
+  "ownerId": "paper_178...",
+  "createdBy": "teacher_001",
+  "callbackPath": "/api/ai/tasks/aitask_178.../callback"
+}
+```
+
+Dispatch responses:
+
+- Missing `baseUrl` or `apiKey`: task status becomes `config_required`, response status `409`.
+- Provider returns 2xx: task status becomes `processing`; provider response is stored in `result_json`.
+- Provider returns non-2xx or network error: task status becomes `failed`; error details are stored in `error_message`.
+
+`POST /api/ai/tasks/{taskID}/callback` lets the third-party Provider write back progress or final results. If `callbackSecret` is configured, the Provider must send `X-AI-Callback-Secret`.
+
+```json
+{
+  "status": "succeeded",
+  "result": {
+    "summary": "已完成阅卷",
+    "scores": []
+  }
+}
+```
+
+Supported callback statuses: `processing`, `succeeded`, and `failed`. For compatibility, the API also accepts `completed` and stores it as `succeeded`.
+
 `GET /api/learning/profile?className=六年级%203%20班` returns class knowledge mastery with current/previous values, trend, error count, affected-student count, student risks, and missing-work alerts. Score generation stores a daily mastery snapshot calculated from per-question score rate and wrong-question frequency, so trends can compare multiple exams.
 
 `GET /api/reports/guardian?studentName=李四` returns a simplified guardian-facing summary with the latest score, mistake count, weak knowledge points, and concrete home-study actions.
+
+## Student And Guardian Portal
+
+`GET /api/portal/student?studentId={studentID}` returns the Phase 2 student learning workspace. Student and guardian portal responses are scoped to the selected learner only: personal latest score, personal homework status, personal score trend, personal mistakes, weak knowledge points, and AI product entries. Class/grade aggregate analytics, rankings, highest/lowest scores, and other-student dimensions are intentionally not returned here; those remain available only through teacher, researcher, and administrator analytics endpoints.
+
+```json
+{
+  "studentId": "stu_001",
+  "studentName": "张三",
+  "gradeName": "六年级",
+  "className": "六年级 3 班",
+  "scoreSummary": {
+    "gradeName": "六年级",
+    "className": "六年级 3 班",
+    "personal": 85
+  },
+  "homeworkSummary": {
+    "total": 2,
+    "completed": 1,
+    "pending": 1,
+    "overdue": 0,
+    "completion": 50,
+    "needsAttention": 1
+  },
+  "homework": [
+    {
+      "id": "assign_001",
+      "title": "六年级数学期中卷",
+      "subject": "数学",
+      "status": "graded",
+      "dueAt": "2026-06-23 18:00"
+    }
+  ],
+  "scoreTrend": [
+    { "label": "六年级数学期中卷", "score": 85 }
+  ],
+  "mistakes": [
+    {
+      "subject": "数学",
+      "paperCount": 1,
+      "homeworkCount": 0,
+      "items": []
+    }
+  ],
+  "weakPoints": ["比例"],
+  "ai": [
+    {
+      "key": "analysis",
+      "name": "AI 学情分析",
+      "status": "planned",
+      "description": "多维分析学科与知识点短板，输出补漏地图",
+      "cta": "登记分析意向",
+      "priceLabel": "后续付费"
+    }
+  ],
+  "offers": [
+    {
+      "key": "analysis",
+      "name": "AI 学情深度分析",
+      "description": "把成绩、作业和错题整理成知识点短板与掌握程度，生成可解释的补漏地图。",
+      "cta": "预约开通",
+      "priceLabel": "即将开放"
+    }
+  ]
+}
+```
+
+`GET /api/portal/guardian?guardianId={guardianID}&studentId={studentID}` returns the approved children for the guardian plus the selected child's portal data. The `student_guardians` table is the access gate; a guardian cannot request a child that has not passed certification.
+
+```json
+{
+  "guardianId": "guardian_001",
+  "children": [
+    {
+      "studentId": "stu_001",
+      "studentName": "张三",
+      "gradeName": "六年级",
+      "className": "六年级 3 班"
+    }
+  ],
+  "selected": {
+    "studentId": "stu_001",
+    "studentName": "张三"
+  }
+}
+```
+
+`POST /api/ai/capabilities/{analysis|ladder}/requests` records a waitlist/intent record only. It does not call a model provider in the current phase.
+
+```json
+{
+  "studentId": "stu_001",
+  "userId": "guardian_001",
+  "channel": "guardian"
+}
+```
 
 ## Core Data Model
 
@@ -605,8 +1006,110 @@ Organization and identity:
 
 - `schools`, `campuses`, `grades`, `classes`
 - `users`, `roles`, `user_roles`
-- `teachers`, `teacher_classes`
+- `teachers`, `teacher_classes`, `subjects`, `class_subjects`, `teacher_grades`, `teacher_subjects`
 - `students`, `guardians`, `student_guardians`
+- `guardian_invitations`, `guardian_certifications`
+
+## Organization And Guardian Certification
+
+`GET /api/organization/graph` returns the school tree, aggregate counts, selectable organization lists, and pending guardian certification records. The selectable lists are used by the Web admin screen to create real relations instead of relying on hard-coded ids.
+
+```json
+{
+  "counts": {
+    "schools": 1,
+    "grades": 1,
+    "classes": 1,
+    "teachers": 1,
+    "students": 3,
+    "subjects": 3,
+    "classSubjects": 1,
+    "pendingCertifications": 0
+  },
+  "schools": [
+    {
+      "id": "school_001",
+      "name": "示范学校",
+      "type": "school",
+      "children": [
+        {
+          "id": "grade_6",
+          "name": "六年级",
+          "type": "grade",
+          "children": [
+            { "id": "class_603", "name": "六年级 3 班", "type": "class" }
+          ]
+        }
+      ]
+    }
+  ],
+  "grades": [{ "id": "grade_6", "name": "六年级", "schoolId": "school_001" }],
+  "classes": [{ "id": "class_603", "name": "六年级 3 班", "schoolId": "school_001", "gradeId": "grade_6" }],
+  "subjects": [{ "id": "subject_math", "name": "数学", "schoolId": "school_001" }],
+  "classSubjects": [{ "id": "course_603_math", "name": "六年级 3 班 · 数学", "schoolId": "school_001", "gradeId": "grade_6", "classId": "class_603", "subjectId": "subject_math", "teacherId": "teacher_001", "meta": "陈老师" }],
+  "teachers": [{ "id": "teacher_001", "name": "陈老师", "schoolId": "school_001", "gradeIds": ["grade_6"], "subjectIds": ["subject_math"], "meta": "数学" }],
+  "students": [{ "id": "stu_001", "name": "张三", "schoolId": "school_001", "gradeId": "grade_6", "classId": "class_603", "studentNo": "60301" }],
+  "certifications": []
+}
+```
+
+`POST /api/organization/{kind}` creates Phase 1 entities and their required relations.
+
+- `schools`: `{ "name": "第一实验学校" }`
+- `grades`: `{ "name": "七年级", "schoolId": "school_001", "stage": "middle" }`
+- `subjects`: `{ "name": "物理", "schoolId": "school_001", "code": "physics" }`
+- `classes`: `{ "name": "七年级 1 班", "schoolId": "school_001", "gradeId": "grade_7" }`
+- `class-subjects`: `{ "schoolId": "school_001", "gradeId": "grade_7", "classId": "class_701", "subjectId": "subject_physics", "teacherId": "teacher_002" }`
+- `teachers`: `{ "name": "王老师", "schoolId": "school_001", "gradeId": "grade_7", "subjectId": "subject_physics", "classId": "class_701", "mobile": "13800000000" }`
+- `students`: `{ "name": "小明", "classId": "class_701", "studentNo": "70101" }`
+
+Class-subject creation writes `class_subjects` and is the curriculum-level relation that defines which subjects a class offers. `teacherId` is optional and can assign the current course teacher. Teacher creation still writes `users`, `teachers`, `teacher_grades`, `teacher_subjects`, and optionally `teacher_classes`. Student creation writes `users` and `students`.
+
+`POST /api/guardian/invitations` creates a teacher-scoped guardian invite. The teacher must be assigned to the student's grade before the invite can be created.
+
+```json
+{
+  "teacherId": "teacher_001",
+  "studentId": "stu_001",
+  "mobileHint": "13800000011"
+}
+```
+
+Response includes the one-time token and an invite path:
+
+```json
+{
+  "id": "invite_...",
+  "token": "a1b2...",
+  "invitePath": "/guardian/certify?token=a1b2...",
+  "expiresAt": "2026-07-02T12:00:00+08:00"
+}
+```
+
+`POST /api/guardian/certifications` submits a guardian certification request. The requester can use an existing `guardianId`, or provide `guardianName` and `mobile` to create a guardian account before review.
+
+```json
+{
+  "token": "a1b2...",
+  "guardianName": "张三家长",
+  "mobile": "13800000011",
+  "relationship": "parent"
+}
+```
+
+The certification stays `pending`; `student_guardians` is not written at submit time.
+
+`PATCH /api/guardian/certifications/{certificationID}` approves or rejects the request.
+
+```json
+{
+  "status": "approved",
+  "reviewerId": "user_admin_001",
+  "reviewNote": "信息匹配，允许访问"
+}
+```
+
+Only approved requests write or update `student_guardians`, which is the access gate for guardian portal data and multi-child switching.
 
 Exam and assignment lifecycle:
 
@@ -622,6 +1125,11 @@ Template and question structure:
 - `question_templates`: question number, type, score, standard answer, scoring rules, knowledge points, and answer-region coordinates.
 - `question_types`: objective/subjective type definitions and auto-grade capability.
 - `knowledge_points`: subject knowledge taxonomy.
+- `question_bank`: reusable questions independent from paper templates.
+- `question_bank_knowledge_points`: normalized question-to-knowledge relations for search and future paper composition.
+- `paper_compositions`: teacher-created paper drafts.
+- `paper_composition_questions`: selected question-bank items, order, and score inside a paper draft.
+- `ai_tasks`: third-party AI task queue for paper analysis, AI composition, AI grading, student analysis, dispatch status, provider response, and callback result tracking.
 
 Grading and traceability:
 
@@ -636,14 +1144,16 @@ Grading and traceability:
 
 Wrong-question archive:
 
-- `wrong_questions`: student, submission, question, knowledge point, score/max score, correct answer, student answer, teacher explanation, correction status, repractice status, correction time.
+- `wrong_questions`: student, submission, question, primary knowledge point, score/max score, correct answer, student answer, teacher explanation, correction status, repractice status, correction time.
+- `wrong_question_knowledge_points`: normalized wrong-question-to-knowledge relations used by student/guardian weak-point views, future AI analysis, and future targeted practice generation.
 - `repractice_tasks`: selected wrong-question ids, linked knowledge points, due time, and assignment status.
 - `knowledge_mastery_history`: dated class/student mastery snapshots used for multi-exam trend comparison.
 
 Object storage metadata:
 
 - `object_files`: object key, bucket, storage driver, public URL, content type, byte size, purpose, owner type/id, metadata JSON.
-- Current purposes include `template_source`, `student_answer`, and `scan_upload`; the same table is reserved for cropped answer images, OCR intermediate files, and report exports.
+- `answer_sheet_uploads`: student answer sheet files linked to paper drafts and reserved grading tasks.
+- Current object file purposes include `template_source`, `blank_paper`, `student_answer`, and `scan_upload`; the same table is reserved for cropped answer images, OCR intermediate files, and report exports.
 
 ## Subjective Decision Persistence
 

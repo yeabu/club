@@ -1,0 +1,41 @@
+name: club-ai-worker-214
+
+services:
+  ai-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: club-ai-worker:${AI_WORKER_IMAGE_TAG:-latest}
+    container_name: club-ai-worker
+    restart: unless-stopped
+    ports:
+      - "${AI_WORKER_HOST_PORT:-8090}:8090"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      AI_WORKER_PORT: "8090"
+      AI_WORKER_CONSUME_REDIS: ${AI_WORKER_CONSUME_REDIS:-true}
+      AI_WORKER_SCAN_STREAM: ${AI_WORKER_SCAN_STREAM:-club:scan:tasks}
+      AI_WORKER_REDIS_GROUP: ${AI_WORKER_REDIS_GROUP:-club-ai-worker}
+      AI_WORKER_REDIS_CONSUMER: ${AI_WORKER_REDIS_CONSUMER:-ai-worker-214}
+      AI_WORKER_RESULT_DIR: /data/ai-worker/results
+      AI_MODEL_VERSION: ${AI_MODEL_VERSION:-ai-worker-214}
+      REDIS_ADDR: ${REDIS_ADDR:-host.docker.internal:6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      API_BASE_URL: ${API_BASE_URL:-http://host.docker.internal:8080}
+      PADDLEOCR_SERVICE_URL: ${PADDLEOCR_SERVICE_URL:-}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-45}
+    volumes:
+      - ${AI_WORKER_RESULT_DIR_HOST:-/data/club/ai-worker/results}:/data/ai-worker/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

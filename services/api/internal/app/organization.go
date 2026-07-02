@@ -22,8 +22,31 @@ type OrganizationNode struct {
 }
 
 type OrganizationGraphResponse struct {
-	Schools []OrganizationNode `json:"schools"`
-	Counts  map[string]int     `json:"counts"`
+	Schools        []OrganizationNode     `json:"schools"`
+	Counts         map[string]int         `json:"counts"`
+	Grades         []OrganizationListItem `json:"grades,omitempty"`
+	Classes        []OrganizationListItem `json:"classes,omitempty"`
+	Subjects       []OrganizationListItem `json:"subjects,omitempty"`
+	ClassSubjects  []OrganizationListItem `json:"classSubjects,omitempty"`
+	Teachers       []OrganizationListItem `json:"teachers,omitempty"`
+	Students       []OrganizationListItem `json:"students,omitempty"`
+	Certifications []CertificationRecord  `json:"certifications,omitempty"`
+}
+
+type OrganizationListItem struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	SchoolID     string   `json:"schoolId,omitempty"`
+	GradeID      string   `json:"gradeId,omitempty"`
+	ClassID      string   `json:"classId,omitempty"`
+	SubjectID    string   `json:"subjectId,omitempty"`
+	TeacherID    string   `json:"teacherId,omitempty"`
+	StudentNo    string   `json:"studentNo,omitempty"`
+	Mobile       string   `json:"mobile,omitempty"`
+	Relationship string   `json:"relationship,omitempty"`
+	GradeIDs     []string `json:"gradeIds,omitempty"`
+	SubjectIDs   []string `json:"subjectIds,omitempty"`
+	Meta         string   `json:"meta,omitempty"`
 }
 
 type OrgCreateRequest struct {
@@ -50,6 +73,8 @@ type GuardianInvitationRequest struct {
 type GuardianCertificationRequest struct {
 	Token             string `json:"token"`
 	GuardianID        string `json:"guardianId"`
+	GuardianName      string `json:"guardianName"`
+	Mobile            string `json:"mobile"`
 	Relationship      string `json:"relationship"`
 	EvidenceObjectKey string `json:"evidenceObjectKey"`
 }
@@ -94,11 +119,11 @@ func (app *App) handleOrganizationCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req OrgCreateRequest
-	if err := decodeJSON(r, &req); err != nil || strings.TrimSpace(req.Name) == "" {
+	kind := r.PathValue("kind")
+	if err := decodeJSON(r, &req); err != nil || (strings.TrimSpace(req.Name) == "" && kind != "class-subjects") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
-	kind := r.PathValue("kind")
 	id, err := app.store.CreateOrganizationEntity(r.Context(), kind, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -131,8 +156,12 @@ func (app *App) handleGuardianCertification(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req GuardianCertificationRequest
-	if decodeJSON(r, &req) != nil || req.Token == "" || req.GuardianID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "token and guardianId are required"})
+	if decodeJSON(r, &req) != nil || strings.TrimSpace(req.Token) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "token is required"})
+		return
+	}
+	if strings.TrimSpace(req.GuardianID) == "" && strings.TrimSpace(req.GuardianName) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "guardianId or guardianName is required"})
 		return
 	}
 	id, err := app.store.SubmitGuardianCertification(r.Context(), req)
@@ -174,7 +203,8 @@ func (app *App) handleCertificationDecision(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Store) CreateOrganizationEntity(ctx context.Context, kind string, req OrgCreateRequest) (string, error) {
-	id := fmt.Sprintf("%s_%d", strings.TrimSuffix(kind, "s"), time.Now().UnixNano())
+	idPrefix := strings.ReplaceAll(strings.TrimSuffix(kind, "s"), "-", "_")
+	id := fmt.Sprintf("%s_%d", idPrefix, time.Now().UnixNano())
 	var query string
 	var args []any
 	switch kind {
@@ -184,20 +214,59 @@ func (s *Store) CreateOrganizationEntity(ctx context.Context, kind string, req O
 		if req.SchoolID == "" {
 			return "", errors.New("schoolId is required")
 		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM schools WHERE id=?`, []any{req.SchoolID}, "schoolId is invalid"); err != nil {
+			return "", err
+		}
+		if req.Stage == "" {
+			req.Stage = "primary"
+		}
 		query, args = `INSERT INTO grades (id, school_id, name, stage, sort_order) VALUES (?, ?, ?, ?, 0)`, []any{id, req.SchoolID, req.Name, req.Stage}
 	case "subjects":
 		if req.SchoolID == "" {
 			return "", errors.New("schoolId is required")
+		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM schools WHERE id=?`, []any{req.SchoolID}, "schoolId is invalid"); err != nil {
+			return "", err
 		}
 		query, args = `INSERT INTO subjects (id, school_id, name, code) VALUES (?, ?, ?, ?)`, []any{id, req.SchoolID, req.Name, req.Code}
 	case "classes":
 		if req.SchoolID == "" || req.GradeID == "" {
 			return "", errors.New("schoolId and gradeId are required")
 		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM grades WHERE id=? AND school_id=?`, []any{req.GradeID, req.SchoolID}, "gradeId is invalid for this school"); err != nil {
+			return "", err
+		}
 		query, args = `INSERT INTO classes (id, school_id, grade_id, name, grade) SELECT ?, ?, ?, ?, name FROM grades WHERE id = ?`, []any{id, req.SchoolID, req.GradeID, req.Name, req.GradeID}
+	case "class-subjects":
+		if req.SchoolID == "" || req.GradeID == "" || req.ClassID == "" || req.SubjectID == "" {
+			return "", errors.New("schoolId, gradeId, classId and subjectId are required")
+		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM classes WHERE id=? AND school_id=? AND grade_id=?`, []any{req.ClassID, req.SchoolID, req.GradeID}, "classId is invalid for this school and grade"); err != nil {
+			return "", err
+		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM subjects WHERE id=? AND school_id=?`, []any{req.SubjectID, req.SchoolID}, "subjectId is invalid for this school"); err != nil {
+			return "", err
+		}
+		if req.TeacherID != "" {
+			if err := s.requireReference(ctx, `SELECT COUNT(*) FROM teachers WHERE id=? AND school_id=?`, []any{req.TeacherID, req.SchoolID}, "teacherId is invalid for this school"); err != nil {
+				return "", err
+			}
+		}
+		query, args = `INSERT INTO class_subjects (id, school_id, grade_id, class_id, subject_id, teacher_id) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE teacher_id=VALUES(teacher_id), status='active'`, []any{id, req.SchoolID, req.GradeID, req.ClassID, req.SubjectID, req.TeacherID}
 	case "teachers":
 		if req.SchoolID == "" || req.GradeID == "" || req.SubjectID == "" {
 			return "", errors.New("schoolId, gradeId and subjectId are required")
+		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM grades WHERE id=? AND school_id=?`, []any{req.GradeID, req.SchoolID}, "gradeId is invalid for this school"); err != nil {
+			return "", err
+		}
+		if err := s.requireReference(ctx, `SELECT COUNT(*) FROM subjects WHERE id=? AND school_id=?`, []any{req.SubjectID, req.SchoolID}, "subjectId is invalid for this school"); err != nil {
+			return "", err
+		}
+		if req.ClassID != "" {
+			if err := s.requireReference(ctx, `SELECT COUNT(*) FROM classes WHERE id=? AND grade_id=?`, []any{req.ClassID, req.GradeID}, "classId is invalid for this grade"); err != nil {
+				return "", err
+			}
 		}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -217,17 +286,56 @@ func (s *Store) CreateOrganizationEntity(ctx context.Context, kind string, req O
 		if _, err = tx.ExecContext(ctx, `INSERT INTO teacher_subjects (teacher_id, subject_id) VALUES (?, ?)`, id, req.SubjectID); err != nil {
 			return "", err
 		}
+		if req.ClassID != "" {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO teacher_classes (teacher_id, class_id, subject) SELECT ?, ?, name FROM subjects WHERE id=?`, id, req.ClassID, req.SubjectID); err != nil {
+				return "", err
+			}
+		}
+		_, _ = tx.ExecContext(ctx, `INSERT IGNORE INTO user_roles (user_id, role_id, org_type, org_id) VALUES (?, 'role_teacher', 'school', ?)`, userID, req.SchoolID)
 		return id, tx.Commit()
 	case "students":
 		if req.ClassID == "" {
 			return "", errors.New("classId is required")
 		}
-		query, args = `INSERT INTO students (id, class_id, student_no, name, guardian_name) VALUES (?, ?, ?, ?, '')`, []any{id, req.ClassID, req.StudentNo, req.Name}
+		userID := "user_" + id
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return "", err
+		}
+		defer tx.Rollback()
+		var schoolID string
+		if err = tx.QueryRowContext(ctx, `SELECT school_id FROM classes WHERE id=?`, req.ClassID).Scan(&schoolID); err != nil {
+			return "", errors.New("classId is invalid")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO users (id, school_id, display_name, mobile) VALUES (?, ?, ?, ?)`, userID, schoolID, req.Name, req.Mobile); err != nil {
+			return "", err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO students (id, user_id, class_id, student_no, name, guardian_name) VALUES (?, ?, ?, ?, ?, '')`, id, userID, req.ClassID, req.StudentNo, req.Name); err != nil {
+			return "", err
+		}
+		return id, tx.Commit()
 	default:
 		return "", errors.New("unsupported organization entity")
 	}
-	_, err := s.db.ExecContext(ctx, query, args...)
-	return id, err
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return "", err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return "", errors.New("referenced entity is invalid")
+	}
+	return id, nil
+}
+
+func (s *Store) requireReference(ctx context.Context, query string, args []any, message string) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return errors.New(message)
+	}
+	return nil
 }
 
 func (s *Store) OrganizationGraph(ctx context.Context) (OrganizationGraphResponse, error) {
@@ -238,7 +346,7 @@ func (s *Store) OrganizationGraph(ctx context.Context) (OrganizationGraphRespons
 	defer rows.Close()
 	schools := map[string]*OrganizationNode{}
 	grades := map[string]*OrganizationNode{}
-	counts := map[string]int{"schools": 0, "grades": 0, "classes": 0, "teachers": 0, "students": 0, "subjects": 0, "pendingCertifications": 0}
+	counts := map[string]int{"schools": 0, "grades": 0, "classes": 0, "teachers": 0, "students": 0, "subjects": 0, "classSubjects": 0, "pendingCertifications": 0}
 	for rows.Next() {
 		var sid, sn string
 		var gid, gn, cid, cn sql.NullString
@@ -265,7 +373,7 @@ func (s *Store) OrganizationGraph(ctx context.Context) (OrganizationGraphRespons
 			}
 		}
 	}
-	for key, table := range map[string]string{"teachers": "teachers", "students": "students", "subjects": "subjects"} {
+	for key, table := range map[string]string{"teachers": "teachers", "students": "students", "subjects": "subjects", "classSubjects": "class_subjects"} {
 		var count int
 		_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count)
 		counts[key] = count
@@ -277,7 +385,94 @@ func (s *Store) OrganizationGraph(ctx context.Context) (OrganizationGraphRespons
 	for _, school := range schools {
 		result.Schools = append(result.Schools, *school)
 	}
-	return result, rows.Err()
+	if rows.Err() != nil {
+		return OrganizationGraphResponse{}, rows.Err()
+	}
+	result.Grades, _ = s.organizationList(ctx, `SELECT id,name,school_id,'' AS grade_id,'' AS class_id,'' AS subject_id,'' AS student_no,'' AS mobile,'' AS relationship FROM grades ORDER BY sort_order,name`)
+	result.Classes, _ = s.organizationList(ctx, `SELECT id,name,school_id,grade_id,'' AS class_id,'' AS subject_id,'' AS student_no,'' AS mobile,'' AS relationship FROM classes ORDER BY name`)
+	result.Subjects, _ = s.organizationList(ctx, `SELECT id,name,school_id,'' AS grade_id,'' AS class_id,'' AS subject_id,'' AS student_no,'' AS mobile,'' AS relationship FROM subjects ORDER BY name`)
+	result.ClassSubjects, _ = s.classSubjectList(ctx)
+	result.Teachers, _ = s.teacherList(ctx)
+	result.Students, _ = s.organizationList(ctx, `SELECT st.id,st.name,c.school_id,c.grade_id,st.class_id,'' AS subject_id,st.student_no,'' AS mobile,'' AS relationship FROM students st JOIN classes c ON c.id=st.class_id ORDER BY c.name, st.student_no, st.name`)
+	result.Certifications, _ = s.Certifications(ctx, "pending")
+	return result, nil
+}
+
+func (s *Store) classSubjectList(ctx context.Context) ([]OrganizationListItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT cs.id, CONCAT(c.name, ' · ', sub.name), cs.school_id, cs.grade_id, cs.class_id, cs.subject_id, COALESCE(cs.teacher_id, ''), COALESCE(t.name, '')
+		FROM class_subjects cs
+		JOIN classes c ON c.id=cs.class_id
+		JOIN subjects sub ON sub.id=cs.subject_id
+		LEFT JOIN teachers t ON t.id=cs.teacher_id
+		WHERE cs.status='active'
+		ORDER BY c.name, sub.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrganizationListItem{}
+	for rows.Next() {
+		var item OrganizationListItem
+		if err := rows.Scan(&item.ID, &item.Name, &item.SchoolID, &item.GradeID, &item.ClassID, &item.SubjectID, &item.TeacherID, &item.Meta); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) organizationList(ctx context.Context, query string) ([]OrganizationListItem, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrganizationListItem{}
+	for rows.Next() {
+		var item OrganizationListItem
+		if err := rows.Scan(&item.ID, &item.Name, &item.SchoolID, &item.GradeID, &item.ClassID, &item.SubjectID, &item.StudentNo, &item.Mobile, &item.Relationship); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) teacherList(ctx context.Context) ([]OrganizationListItem, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,school_id,subject FROM teachers ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrganizationListItem{}
+	for rows.Next() {
+		var item OrganizationListItem
+		if err := rows.Scan(&item.ID, &item.Name, &item.SchoolID, &item.Meta); err != nil {
+			return nil, err
+		}
+		item.GradeIDs, _ = s.teacherRelationIDs(ctx, `SELECT grade_id FROM teacher_grades WHERE teacher_id=? ORDER BY grade_id`, item.ID)
+		item.SubjectIDs, _ = s.teacherRelationIDs(ctx, `SELECT subject_id FROM teacher_subjects WHERE teacher_id=? ORDER BY subject_id`, item.ID)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) teacherRelationIDs(ctx context.Context, query, teacherID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query, teacherID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []string{}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
 }
 
 func (s *Store) CreateGuardianInvitation(ctx context.Context, req GuardianInvitationRequest) (string, string, string, error) {
@@ -300,13 +495,53 @@ func (s *Store) SubmitGuardianCertification(ctx context.Context, req GuardianCer
 	if err != nil {
 		return "", errors.New("invitation is invalid or expired")
 	}
+	guardianID, err := s.ensureGuardian(ctx, req, studentID)
+	if err != nil {
+		return "", err
+	}
 	id := fmt.Sprintf("cert_%d", time.Now().UnixNano())
 	relationship := req.Relationship
 	if relationship == "" {
 		relationship = "parent"
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO guardian_certifications (id, invitation_id, student_id, guardian_id, relationship, evidence_object_key) VALUES (?, ?, ?, ?, ?, ?)`, id, invitationID, studentID, req.GuardianID, relationship, req.EvidenceObjectKey)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO guardian_certifications (id, invitation_id, student_id, guardian_id, relationship, evidence_object_key) VALUES (?, ?, ?, ?, ?, ?)`, id, invitationID, studentID, guardianID, relationship, req.EvidenceObjectKey)
 	return id, err
+}
+
+func (s *Store) ensureGuardian(ctx context.Context, req GuardianCertificationRequest, studentID string) (string, error) {
+	if strings.TrimSpace(req.GuardianID) != "" {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM guardians WHERE id=?`, req.GuardianID).Scan(&exists); err != nil {
+			return "", err
+		}
+		if exists == 0 {
+			return "", errors.New("guardianId is invalid")
+		}
+		return req.GuardianID, nil
+	}
+	guardianName := strings.TrimSpace(req.GuardianName)
+	if guardianName == "" {
+		return "", errors.New("guardianName is required")
+	}
+	schoolID := "school_001"
+	if err := s.db.QueryRowContext(ctx, `SELECT c.school_id FROM students st JOIN classes c ON c.id=st.class_id WHERE st.id=?`, studentID).Scan(&schoolID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	guardianID := fmt.Sprintf("guardian_%d", time.Now().UnixNano())
+	userID := "user_" + guardianID
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO users (id, school_id, display_name, mobile) VALUES (?, ?, ?, ?)`, userID, schoolID, guardianName, req.Mobile); err != nil {
+		return "", err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO guardians (id, user_id, name, mobile, relationship) VALUES (?, ?, ?, ?, ?)`, guardianID, userID, guardianName, req.Mobile, req.Relationship); err != nil {
+		return "", err
+	}
+	_, _ = tx.ExecContext(ctx, `INSERT IGNORE INTO user_roles (user_id, role_id, org_type, org_id) VALUES (?, 'role_guardian', 'student', '')`, userID)
+	return guardianID, tx.Commit()
 }
 
 func (s *Store) Certifications(ctx context.Context, status string) ([]CertificationRecord, error) {
@@ -359,5 +594,14 @@ func (s *Store) DecideGuardianCertification(ctx context.Context, id string, req 
 }
 
 func organizationFixture() OrganizationGraphResponse {
-	return OrganizationGraphResponse{Counts: map[string]int{"schools": 1, "grades": 1, "classes": 1, "teachers": 1, "students": 3, "subjects": 3, "pendingCertifications": 0}, Schools: []OrganizationNode{{ID: "school_001", Name: "示范学校", Type: "school", Children: []OrganizationNode{{ID: "grade_6", Name: "六年级", Type: "grade", Children: []OrganizationNode{{ID: "class_603", Name: "六年级 3 班", Type: "class"}}}}}}}
+	return OrganizationGraphResponse{
+		Counts:        map[string]int{"schools": 1, "grades": 1, "classes": 1, "teachers": 1, "students": 3, "subjects": 3, "classSubjects": 1, "pendingCertifications": 0},
+		Schools:       []OrganizationNode{{ID: "school_001", Name: "示范学校", Type: "school", Children: []OrganizationNode{{ID: "grade_6", Name: "六年级", Type: "grade", Children: []OrganizationNode{{ID: "class_603", Name: "六年级 3 班", Type: "class"}}}}}},
+		Grades:        []OrganizationListItem{{ID: "grade_6", Name: "六年级", SchoolID: "school_001"}},
+		Classes:       []OrganizationListItem{{ID: "class_603", Name: "六年级 3 班", SchoolID: "school_001", GradeID: "grade_6"}},
+		Subjects:      []OrganizationListItem{{ID: "subject_math", Name: "数学", SchoolID: "school_001"}},
+		ClassSubjects: []OrganizationListItem{{ID: "course_603_math", Name: "六年级 3 班 · 数学", SchoolID: "school_001", GradeID: "grade_6", ClassID: "class_603", SubjectID: "subject_math", TeacherID: "teacher_001", Meta: "陈老师"}},
+		Teachers:      []OrganizationListItem{{ID: "teacher_001", Name: "陈老师", SchoolID: "school_001", GradeIDs: []string{"grade_6"}, SubjectIDs: []string{"subject_math"}, Meta: "数学"}},
+		Students:      []OrganizationListItem{{ID: "stu_001", Name: "张三", SchoolID: "school_001", GradeID: "grade_6", ClassID: "class_603", StudentNo: "60301"}},
+	}
 }
