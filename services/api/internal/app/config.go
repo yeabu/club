@@ -54,6 +54,7 @@ type AIProviderConfig struct {
 	Name           string `json:"name" yaml:"name"`
 	BaseURL        string `json:"baseUrl" yaml:"baseUrl"`
 	APIKey         string `json:"-" yaml:"apiKey"`
+	Model          string `json:"model" yaml:"model"`
 	TimeoutSeconds int    `json:"timeoutSeconds" yaml:"timeoutSeconds"`
 	CallbackSecret string `json:"-" yaml:"callbackSecret"`
 }
@@ -104,10 +105,11 @@ func LoadConfig() Config {
 	config.OBS.SecretAccessKey = env("OBS_SECRET_ACCESS_KEY", config.OBS.SecretAccessKey)
 	config.OBS.Bucket = env("OBS_BUCKET", config.OBS.Bucket)
 	config.OBS.Region = env("OBS_REGION", config.OBS.Region)
-	config.AIProvider.Name = env("AI_PROVIDER_NAME", config.AIProvider.Name)
-	config.AIProvider.BaseURL = env("AI_PROVIDER_BASE_URL", config.AIProvider.BaseURL)
-	config.AIProvider.APIKey = env("AI_PROVIDER_API_KEY", config.AIProvider.APIKey)
-	config.AIProvider.TimeoutSeconds = envInt("AI_PROVIDER_TIMEOUT_SECONDS", config.AIProvider.TimeoutSeconds)
+	config.AIProvider.Name = env("AI_PROVIDER_NAME", env("AI_PROVIDER", config.AIProvider.Name))
+	config.AIProvider.BaseURL = env("AI_PROVIDER_BASE_URL", env("ANTHROPIC_BASE_URL", config.AIProvider.BaseURL))
+	config.AIProvider.APIKey = env("AI_PROVIDER_API_KEY", env("ANTHROPIC_AUTH_TOKEN", config.AIProvider.APIKey))
+	config.AIProvider.Model = env("AI_PROVIDER_MODEL", env("ANTHROPIC_MODEL", config.AIProvider.Model))
+	config.AIProvider.TimeoutSeconds = envInt("AI_PROVIDER_TIMEOUT_SECONDS", envInt("AI_TIMEOUT_SECONDS", config.AIProvider.TimeoutSeconds))
 	config.AIProvider.CallbackSecret = env("AI_PROVIDER_CALLBACK_SECRET", config.AIProvider.CallbackSecret)
 	if config.AIProvider.Name == "" {
 		config.AIProvider.Name = "generic-http"
@@ -115,7 +117,20 @@ func LoadConfig() Config {
 	if config.AIProvider.TimeoutSeconds <= 0 {
 		config.AIProvider.TimeoutSeconds = 30
 	}
+	normalizeAIProviderConfig(&config.AIProvider)
 	return config
+}
+
+func normalizeAIProviderConfig(config *AIProviderConfig) {
+	baseURL := strings.ToLower(strings.TrimSpace(config.BaseURL))
+	model := strings.ToLower(strings.TrimSpace(config.Model))
+	if strings.Contains(baseURL, "api.deepseek.com/anthropic") {
+		config.Name = "deepseek"
+		config.BaseURL = "https://api.deepseek.com/v1"
+		if config.Model == "" || strings.Contains(model, "deepseek-v4") || strings.Contains(model, "anthropic") {
+			config.Model = "deepseek-chat"
+		}
+	}
 }
 
 func (c Config) Public() map[string]any {
@@ -152,10 +167,11 @@ func (c Config) Public() map[string]any {
 		"aiProvider": map[string]any{
 			"name":                   c.AIProvider.Name,
 			"baseUrl":                c.AIProvider.BaseURL,
+			"model":                  c.AIProvider.Model,
 			"timeoutSeconds":         c.AIProvider.TimeoutSeconds,
 			"apiKeyProvided":         c.AIProvider.APIKey != "",
 			"callbackSecretProvided": c.AIProvider.CallbackSecret != "",
-			"configured":             c.AIProvider.BaseURL != "" && c.AIProvider.APIKey != "",
+			"configured":             c.AIProvider.BaseURL != "" && c.AIProvider.APIKey != "" && c.AIProvider.Model != "",
 		},
 	}
 }

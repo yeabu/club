@@ -105,9 +105,30 @@ cp .env.example .env.local
 
 - Go API：先读取 `services/api/config/config.yaml`，再使用 `APP_ENV`、`PORT`、`MYSQL_*`、`REDIS_*`、`MINIO_*`、`OBS_*` 环境变量覆盖同名配置。
 - Python AI Worker：读取 `AI_WORKER_PORT`、`MYSQL_*`、`REDIS_*`、`OBS_*`。
+- 答题卡“AI 生成答题卡”：由 Go API 直接调用三方大模型。优先读取 `AI_PROVIDER_NAME`、`AI_PROVIDER_BASE_URL`、`AI_PROVIDER_API_KEY`、`AI_PROVIDER_MODEL`、`AI_PROVIDER_TIMEOUT_SECONDS`；未配置时兼容旧的 `AI_PROVIDER`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`、`AI_TIMEOUT_SECONDS`。
 - `/health` 只返回脱敏后的配置状态，例如地址、库名、是否提供密钥，不返回密码或 Secret。
 - `GET /api/dev/connections` 用当前开发配置检查 MySQL、Redis、OBS/MinIO 连通性，仅返回连接状态和延迟，不返回密钥。
-- `POST /api/dev/reset-demo` 仅开发环境可用，重置演示主观题复核队列和裁定记录，便于本地调试保存流。
+- Go API 必须连接真实 MySQL 启动；数据库不可用时服务会直接退出，不再进入 fixture 演示模式。
+
+三方 AI 示例配置：
+
+```bash
+AI_PROVIDER_NAME=deepseek
+AI_PROVIDER_BASE_URL=https://api.deepseek.com/v1
+AI_PROVIDER_API_KEY=填入真实密钥
+AI_PROVIDER_MODEL=deepseek-chat
+AI_PROVIDER_TIMEOUT_SECONDS=45
+```
+
+若使用 Anthropic-compatible 接口，可配置：
+
+```bash
+AI_PROVIDER_NAME=anthropic
+AI_PROVIDER_BASE_URL=https://example.com/anthropic
+AI_PROVIDER_API_KEY=填入真实密钥
+AI_PROVIDER_MODEL=provider-model
+AI_PROVIDER_TIMEOUT_SECONDS=45
+```
 
 ### 依赖镜像
 
@@ -184,6 +205,25 @@ cd apps/web
 npm install
 npm run dev
 ```
+
+### 本地演示初始账号
+
+以下账号由数据库种子数据创建，仅用于本地演示和联调；不要用于生产环境。`account` 可填写用户 ID、手机号或邮箱。登录接口为 `POST /api/auth/login`，请求体示例：
+
+```json
+{"account":"user_teacher_001","password":"Teacher@123456"}
+```
+
+接口返回 `authHeaders`，开发调试时可把其中的 `X-User-ID` 等请求头带到后续 API。Web 本地页面会先进入登录页，登录成功后使用返回的请求头访问后续接口。若本地数据库是旧版本，首次使用下表初始密码登录这些种子账号时，后端会自动把对应 `users.password_hash` 修正为当前初始密码。
+
+本地开发环境下，直接在浏览器 GET 打开工作台、学情、错题等只读接口时，如果没有携带认证头，后端会按 `user_teacher_001` 的教师身份读取数据；生产环境不会启用该兜底。
+
+| 角色 | 账号 | 手机/邮箱 | 初始密码 | 说明 |
+| --- | --- | --- | --- | --- |
+| 教务管理员 | `user_admin_001` | `13800000000` / `admin@example.local` | `Admin@123456` | 学校级管理、认证审核、全局数据查看 |
+| 任课教师 | `user_teacher_001` | `13800000001` / `teacher@example.local` | `Teacher@123456` | 六年级 3 班数学教师 |
+| 学生 | `user_stu_001` | `13800000021` / `student@example.local` | `Student@123456` | 张三，六年级 3 班 |
+| 家长 | `user_guardian_001` | `13800000011` / `guardian@example.local` | `Guardian@123456` | 张三家长，同时示例绑定李四 |
 
 开发诊断：
 

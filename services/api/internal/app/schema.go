@@ -39,6 +39,7 @@ var schemaStatements = []string{
 		display_name VARCHAR(80) NOT NULL,
 		mobile VARCHAR(40) DEFAULT '',
 		email VARCHAR(120) DEFAULT '',
+		password_hash CHAR(64) DEFAULT '',
 		status VARCHAR(30) NOT NULL DEFAULT 'active',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -166,6 +167,15 @@ var schemaStatements = []string{
 		UNIQUE KEY uk_guardian_certification_pair (student_id, guardian_id),
 		INDEX idx_guardian_certifications_status (status)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS guardian_certification_logs (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		certification_id VARCHAR(40) NOT NULL,
+		action VARCHAR(40) NOT NULL,
+		actor_id VARCHAR(40) DEFAULT '',
+		message VARCHAR(255) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_guardian_certification_logs_cert (certification_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS ai_capability_requests (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		capability VARCHAR(60) NOT NULL,
@@ -242,8 +252,8 @@ var schemaStatements = []string{
 		INDEX idx_composition_questions_question (question_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS ai_tasks (
-		id VARCHAR(40) PRIMARY KEY,
-		task_type VARCHAR(60) NOT NULL,
+			id VARCHAR(40) PRIMARY KEY,
+			task_type VARCHAR(60) NOT NULL,
 		status VARCHAR(30) NOT NULL DEFAULT 'pending',
 		provider VARCHAR(80) DEFAULT 'third_party_reserved',
 		request_json JSON NOT NULL,
@@ -256,9 +266,29 @@ var schemaStatements = []string{
 		error_message VARCHAR(255) DEFAULT '',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-		INDEX idx_ai_tasks_owner (owner_type, owner_id),
-		INDEX idx_ai_tasks_type_status (task_type, status)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+			INDEX idx_ai_tasks_owner (owner_type, owner_id),
+			INDEX idx_ai_tasks_type_status (task_type, status)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS ai_provider_settings (
+				id VARCHAR(40) PRIMARY KEY,
+				name VARCHAR(80) NOT NULL,
+			display_name VARCHAR(120) NOT NULL,
+			base_url VARCHAR(255) NOT NULL,
+			model VARCHAR(120) NOT NULL,
+			api_key TEXT,
+			timeout_seconds INT NOT NULL DEFAULT 30,
+			callback_secret TEXT,
+			active BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				UNIQUE KEY uk_ai_provider_name (name),
+				INDEX idx_ai_provider_active (active)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS system_settings (
+			setting_key VARCHAR(80) PRIMARY KEY,
+			setting_json JSON NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS question_types (
 		id VARCHAR(40) PRIMARY KEY,
 		name VARCHAR(80) NOT NULL,
@@ -323,14 +353,42 @@ var schemaStatements = []string{
 		name VARCHAR(120) NOT NULL,
 		subject VARCHAR(40) NOT NULL,
 		grade VARCHAR(40) NOT NULL,
+		class_id VARCHAR(40) DEFAULT '',
+		teacher_id VARCHAR(40) DEFAULT '',
 		template_id VARCHAR(40) DEFAULT '',
 		template_version INT NOT NULL DEFAULT 1,
 		status VARCHAR(30) NOT NULL DEFAULT 'draft',
+		max_score DECIMAL(8,2) NOT NULL DEFAULT 0,
+		roster_locked_at DATETIME NULL,
+		grading_policy_json JSON NULL,
 		started_at DATETIME NULL,
 		ended_at DATETIME NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 		INDEX idx_exams_school_status (school_id, status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS exam_students (
+		exam_id VARCHAR(40) NOT NULL,
+		student_id VARCHAR(40) NOT NULL,
+		student_name VARCHAR(80) NOT NULL,
+		class_id VARCHAR(40) NOT NULL,
+		status VARCHAR(30) NOT NULL DEFAULT 'registered',
+		note VARCHAR(255) DEFAULT '',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		PRIMARY KEY (exam_id, student_id),
+		INDEX idx_exam_students_status (exam_id, status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS grading_policies (
+		id VARCHAR(40) PRIMARY KEY,
+		name VARCHAR(80) NOT NULL,
+		objective_min_confidence INT NOT NULL DEFAULT 80,
+		subjective_min_confidence INT NOT NULL DEFAULT 92,
+		subjective_max_score_share DECIMAL(5,2) NOT NULL DEFAULT 0.15,
+		sampling_rate INT NOT NULL DEFAULT 10,
+		require_reason BOOLEAN NOT NULL DEFAULT TRUE,
+		abnormal_fallback BOOLEAN NOT NULL DEFAULT TRUE,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS assignment_classes (
 		assignment_id VARCHAR(40) NOT NULL,
@@ -560,6 +618,17 @@ var schemaStatements = []string{
 		due_at DATETIME NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	`CREATE TABLE IF NOT EXISTS repractice_submissions (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		task_id VARCHAR(40) NOT NULL,
+		wrong_question_id BIGINT NOT NULL,
+		student_id VARCHAR(40) NOT NULL,
+		answer_text TEXT,
+		status VARCHAR(30) NOT NULL DEFAULT 'submitted',
+		submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_repractice_submission (task_id, wrong_question_id, student_id),
+		INDEX idx_repractice_submission_task (task_id, student_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`CREATE TABLE IF NOT EXISTS knowledge_mastery_history (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		class_name VARCHAR(100) NOT NULL,
@@ -658,15 +727,22 @@ var seedStatements = []string{
 		('role_admin', '教务管理员', 'school', JSON_ARRAY('dashboard:read', 'template:write', 'grading:write')),
 		('role_teacher', '任课教师', 'class', JSON_ARRAY('assignment:write', 'grading:write', 'analytics:read')),
 		('role_guardian', '家长', 'student', JSON_ARRAY('student:read', 'wrong-question:read'))`,
-	`INSERT IGNORE INTO users (id, school_id, display_name, mobile, email, status) VALUES
-		('user_teacher_001', 'school_001', '陈老师', '13800000001', 'teacher@example.local', 'active'),
-		('user_stu_001', 'school_001', '张三', '', '', 'active'),
-		('user_stu_002', 'school_001', '李四', '', '', 'active'),
-		('user_stu_003', 'school_001', '赵六', '', '', 'active'),
-		('user_guardian_001', 'school_001', '张三家长', '13800000011', '', 'active'),
-		('user_guardian_002', 'school_001', '李四家长', '13800000012', '', 'active'),
-		('user_guardian_003', 'school_001', '赵六家长', '13800000013', '', 'active')`,
+	`INSERT INTO users (id, school_id, display_name, mobile, email, password_hash, status) VALUES
+		('user_admin_001', 'school_001', '教务管理员', '13800000000', 'admin@example.local', SHA2('Admin@123456', 256), 'active'),
+		('user_teacher_001', 'school_001', '陈老师', '13800000001', 'teacher@example.local', SHA2('Teacher@123456', 256), 'active'),
+		('user_stu_001', 'school_001', '张三', '13800000021', 'student@example.local', SHA2('Student@123456', 256), 'active'),
+		('user_stu_002', 'school_001', '李四', '', '', '', 'active'),
+		('user_stu_003', 'school_001', '赵六', '', '', '', 'active'),
+		('user_guardian_001', 'school_001', '张三家长', '13800000011', 'guardian@example.local', SHA2('Guardian@123456', 256), 'active'),
+		('user_guardian_002', 'school_001', '李四家长', '13800000012', '', '', 'active'),
+		('user_guardian_003', 'school_001', '赵六家长', '13800000013', '', '', 'active')
+		ON DUPLICATE KEY UPDATE
+			mobile = VALUES(mobile),
+			email = VALUES(email),
+			password_hash = CASE WHEN VALUES(password_hash) <> '' THEN VALUES(password_hash) ELSE password_hash END,
+			status = VALUES(status)`,
 	`INSERT IGNORE INTO user_roles (user_id, role_id, org_type, org_id) VALUES
+		('user_admin_001', 'role_admin', 'school', 'school_001'),
 		('user_teacher_001', 'role_teacher', 'class', 'class_603'),
 		('user_guardian_001', 'role_guardian', 'student', 'stu_001'),
 		('user_guardian_002', 'role_guardian', 'student', 'stu_002'),
@@ -705,6 +781,16 @@ var seedStatements = []string{
 		('qt_single_choice', 'single_choice', 'objective', 2, TRUE),
 		('qt_fill_blank', 'fill_blank', 'objective', 3, TRUE),
 		('qt_subjective', 'subjective', 'subjective', 10, FALSE)`,
+	`INSERT INTO grading_policies
+		(id, name, objective_min_confidence, subjective_min_confidence, subjective_max_score_share, sampling_rate, require_reason, abnormal_fallback)
+	VALUES ('default', '默认自动阅卷策略', 80, 92, 0.15, 10, TRUE, TRUE)
+	ON DUPLICATE KEY UPDATE
+		objective_min_confidence = VALUES(objective_min_confidence),
+		subjective_min_confidence = VALUES(subjective_min_confidence),
+		subjective_max_score_share = VALUES(subjective_max_score_share),
+		sampling_rate = VALUES(sampling_rate),
+		require_reason = VALUES(require_reason),
+		abnormal_fallback = VALUES(abnormal_fallback)`,
 	`INSERT INTO paper_templates (id, name, subject, grade, question_count, total_score, source_file_url, status, version, parent_id) VALUES
 		('tpl_001', '六年级数学期中卷', '数学', '六年级', 25, 100, '/mock/templates/tpl_001-blank-paper.pdf', 'published', 1, '')
 		ON DUPLICATE KEY UPDATE
@@ -744,8 +830,21 @@ var seedStatements = []string{
 		('qb_002', 'kp_001', '分数应用题'),
 		('qb_002', 'kp_004', '比例'),
 		('qb_003', 'kp_002', '几何面积')`,
-	`INSERT IGNORE INTO exams (id, school_id, name, subject, grade, template_id, template_version, status, started_at, ended_at) VALUES
-		('exam_001', 'school_001', '六年级数学期中卷', '数学', '六年级', 'tpl_001', 1, 'published', NOW(), NOW() + INTERVAL 1 DAY)`,
+	`INSERT INTO exams (id, school_id, name, subject, grade, class_id, teacher_id, template_id, template_version, status, max_score, roster_locked_at, grading_policy_json, started_at, ended_at) VALUES
+		('exam_001', 'school_001', '六年级数学期中卷', '数学', '六年级', 'class_603', 'teacher_001', 'tpl_001', 1, 'published', 100, NOW(), JSON_OBJECT('objectiveMinConfidence',80,'subjectiveMinConfidence',92,'subjectiveMaxScoreShare',0.15,'samplingRate',10,'requireReason',true,'abnormalFallback',true), NOW(), NOW() + INTERVAL 1 DAY)
+		ON DUPLICATE KEY UPDATE
+			class_id = VALUES(class_id),
+			teacher_id = VALUES(teacher_id),
+			template_id = VALUES(template_id),
+			template_version = VALUES(template_version),
+			status = VALUES(status),
+			max_score = VALUES(max_score),
+			roster_locked_at = COALESCE(roster_locked_at, VALUES(roster_locked_at)),
+			grading_policy_json = VALUES(grading_policy_json)`,
+	`INSERT IGNORE INTO exam_students (exam_id, student_id, student_name, class_id, status) VALUES
+		('exam_001', 'stu_001', '张三', 'class_603', 'registered'),
+		('exam_001', 'stu_002', '李四', 'class_603', 'registered'),
+		('exam_001', 'stu_003', '赵六', 'class_603', 'registered')`,
 	`INSERT IGNORE INTO assignments (id, exam_id, title, kind, class_id, class_name, template_id, template_version, teacher_id, published_at, due_at, status) VALUES
 		('assign_001', 'exam_001', '六年级数学期中卷', 'exam', 'class_603', '六年级 3 班', 'tpl_001', 1, 'teacher_001', NOW(), NOW() + INTERVAL 1 DAY, 'open')`,
 	`INSERT IGNORE INTO assignment_classes (assignment_id, class_id, class_name, publish_status) VALUES

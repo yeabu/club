@@ -106,14 +106,23 @@ type GuardianPortalResponse struct {
 }
 
 func (app *App) handleStudentPortal(w http.ResponseWriter, r *http.Request) {
-	studentID := strings.TrimSpace(r.URL.Query().Get("studentId"))
-	if studentID == "" {
-		studentID = "stu_001"
-	}
 	if app.store == nil {
+		studentID := strings.TrimSpace(r.Header.Get("X-Student-ID"))
+		if studentID == "" {
+			studentID = "stu_001"
+		}
 		writeJSON(w, http.StatusOK, studentPortalFixture(studentID, "张三"))
 		return
 	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.StudentID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "student login is required"})
+		return
+	}
+	studentID := auth.StudentID
 	data, err := app.store.StudentPortal(r.Context(), studentID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "student portal not found"})
@@ -123,12 +132,12 @@ func (app *App) handleStudentPortal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleGuardianPortal(w http.ResponseWriter, r *http.Request) {
-	guardianID := strings.TrimSpace(r.URL.Query().Get("guardianId"))
-	if guardianID == "" {
-		guardianID = "guardian_001"
-	}
 	studentID := strings.TrimSpace(r.URL.Query().Get("studentId"))
 	if app.store == nil {
+		guardianID := strings.TrimSpace(r.Header.Get("X-Guardian-ID"))
+		if guardianID == "" {
+			guardianID = "guardian_001"
+		}
 		children := []GuardianChild{
 			{StudentID: "stu_001", StudentName: "张三", GradeName: "六年级", ClassName: "六年级 3 班"},
 			{StudentID: "stu_002", StudentName: "李四", GradeName: "六年级", ClassName: "六年级 3 班"},
@@ -144,6 +153,15 @@ func (app *App) handleGuardianPortal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, GuardianPortalResponse{GuardianID: guardianID, Children: children, Selected: studentPortalFixture(selectedID, selectedName)})
 		return
 	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.GuardianID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "guardian login is required"})
+		return
+	}
+	guardianID := auth.GuardianID
 	data, err := app.store.GuardianPortal(r.Context(), guardianID, studentID)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "approved guardian relationship is required"})
@@ -166,6 +184,22 @@ func (app *App) handleAICapabilityRequest(w http.ResponseWriter, r *http.Request
 	if decodeJSON(r, &req) != nil || req.StudentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "studentId is required"})
 		return
+	}
+	if app.store != nil {
+		auth, err := app.requestAuth(r.Context(), r)
+		if err != nil || !requireAuth(w, auth) {
+			return
+		}
+		allowed, err := app.store.CanAccessStudent(r.Context(), auth, req.StudentID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "student scope check failed"})
+			return
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "student is outside current user scope"})
+			return
+		}
+		req.UserID = auth.UserID
 	}
 	if req.Channel == "" {
 		req.Channel = "portal"

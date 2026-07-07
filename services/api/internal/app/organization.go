@@ -86,14 +86,32 @@ type CertificationDecisionRequest struct {
 }
 
 type CertificationRecord struct {
-	ID           string `json:"id"`
-	StudentID    string `json:"studentId"`
-	StudentName  string `json:"studentName"`
-	GuardianID   string `json:"guardianId"`
-	GuardianName string `json:"guardianName"`
-	Relationship string `json:"relationship"`
-	Status       string `json:"status"`
-	SubmittedAt  string `json:"submittedAt"`
+	ID                string `json:"id"`
+	StudentID         string `json:"studentId"`
+	StudentName       string `json:"studentName"`
+	GuardianID        string `json:"guardianId"`
+	GuardianName      string `json:"guardianName"`
+	Mobile            string `json:"mobile,omitempty"`
+	Relationship      string `json:"relationship"`
+	EvidenceObjectKey string `json:"evidenceObjectKey,omitempty"`
+	Status            string `json:"status"`
+	ReviewerID        string `json:"reviewerId,omitempty"`
+	ReviewNote        string `json:"reviewNote,omitempty"`
+	SubmittedAt       string `json:"submittedAt"`
+	ReviewedAt        string `json:"reviewedAt,omitempty"`
+}
+
+type CertificationAuditLog struct {
+	ID              int64  `json:"id"`
+	CertificationID string `json:"certificationId"`
+	Action          string `json:"action"`
+	ActorID         string `json:"actorId"`
+	Message         string `json:"message"`
+	CreatedAt       string `json:"createdAt"`
+}
+
+type CertificationAuditLogResponse struct {
+	Items []CertificationAuditLog `json:"items"`
 }
 
 func decodeJSON(r *http.Request, target any) error {
@@ -200,6 +218,19 @@ func (app *App) handleCertificationDecision(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": req.Status})
+}
+
+func (app *App) handleCertificationLogs(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, CertificationAuditLogResponse{Items: []CertificationAuditLog{}})
+		return
+	}
+	items, err := app.store.CertificationLogs(r.Context(), r.PathValue("certificationID"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "certification logs query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, CertificationAuditLogResponse{Items: items})
 }
 
 func (s *Store) CreateOrganizationEntity(ctx context.Context, kind string, req OrgCreateRequest) (string, error) {
@@ -490,10 +521,16 @@ func (s *Store) CreateGuardianInvitation(ctx context.Context, req GuardianInvita
 
 func (s *Store) SubmitGuardianCertification(ctx context.Context, req GuardianCertificationRequest) (string, error) {
 	hash := sha256.Sum256([]byte(req.Token))
-	var invitationID, studentID string
-	err := s.db.QueryRowContext(ctx, `SELECT id, student_id FROM guardian_invitations WHERE token_hash=? AND status='pending' AND expires_at>NOW()`, hex.EncodeToString(hash[:])).Scan(&invitationID, &studentID)
+	var invitationID, studentID, mobileHint string
+	err := s.db.QueryRowContext(ctx, `SELECT id, student_id, COALESCE(mobile_hint, '') FROM guardian_invitations WHERE token_hash=? AND status='pending' AND expires_at>NOW()`, hex.EncodeToString(hash[:])).Scan(&invitationID, &studentID, &mobileHint)
 	if err != nil {
 		return "", errors.New("invitation is invalid or expired")
+	}
+	if strings.TrimSpace(req.EvidenceObjectKey) == "" {
+		return "", errors.New("evidenceObjectKey is required")
+	}
+	if strings.TrimSpace(mobileHint) != "" && normalizeMobile(mobileHint) != normalizeMobile(req.Mobile) {
+		return "", errors.New("guardian mobile does not match invitation hint")
 	}
 	guardianID, err := s.ensureGuardian(ctx, req, studentID)
 	if err != nil {
@@ -505,6 +542,9 @@ func (s *Store) SubmitGuardianCertification(ctx context.Context, req GuardianCer
 		relationship = "parent"
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO guardian_certifications (id, invitation_id, student_id, guardian_id, relationship, evidence_object_key) VALUES (?, ?, ?, ?, ?, ?)`, id, invitationID, studentID, guardianID, relationship, req.EvidenceObjectKey)
+	if err == nil {
+		_ = s.insertCertificationLog(ctx, id, "submitted", guardianID, "家长提交认证材料")
+	}
 	return id, err
 }
 
@@ -548,7 +588,14 @@ func (s *Store) Certifications(ctx context.Context, status string) ([]Certificat
 	if status == "" {
 		status = "pending"
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT gc.id,gc.student_id,st.name,gc.guardian_id,g.name,gc.relationship,gc.status,gc.submitted_at FROM guardian_certifications gc JOIN students st ON st.id=gc.student_id JOIN guardians g ON g.id=gc.guardian_id WHERE gc.status=? ORDER BY gc.submitted_at`, status)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT gc.id,gc.student_id,st.name,gc.guardian_id,g.name,COALESCE(g.mobile,''),gc.relationship,COALESCE(gc.evidence_object_key,''),
+			gc.status,COALESCE(gc.reviewer_id,''),COALESCE(gc.review_note,''),gc.submitted_at,gc.reviewed_at
+		FROM guardian_certifications gc
+		JOIN students st ON st.id=gc.student_id
+		JOIN guardians g ON g.id=gc.guardian_id
+		WHERE gc.status=?
+		ORDER BY gc.submitted_at`, status)
 	if err != nil {
 		return nil, err
 	}
@@ -557,10 +604,14 @@ func (s *Store) Certifications(ctx context.Context, status string) ([]Certificat
 	for rows.Next() {
 		var v CertificationRecord
 		var submitted time.Time
-		if err := rows.Scan(&v.ID, &v.StudentID, &v.StudentName, &v.GuardianID, &v.GuardianName, &v.Relationship, &v.Status, &submitted); err != nil {
+		var reviewed sql.NullTime
+		if err := rows.Scan(&v.ID, &v.StudentID, &v.StudentName, &v.GuardianID, &v.GuardianName, &v.Mobile, &v.Relationship, &v.EvidenceObjectKey, &v.Status, &v.ReviewerID, &v.ReviewNote, &submitted, &reviewed); err != nil {
 			return nil, err
 		}
 		v.SubmittedAt = submitted.Format(time.RFC3339)
+		if reviewed.Valid {
+			v.ReviewedAt = reviewed.Time.Format(time.RFC3339)
+		}
 		items = append(items, v)
 	}
 	return items, rows.Err()
@@ -590,7 +641,48 @@ func (s *Store) DecideGuardianCertification(ctx context.Context, id string, req 
 			return err
 		}
 	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO guardian_certification_logs (certification_id, action, actor_id, message) VALUES (?, ?, ?, ?)`, id, req.Status, req.ReviewerID, req.ReviewNote); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func (s *Store) CertificationLogs(ctx context.Context, certificationID string) ([]CertificationAuditLog, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, certification_id, action, COALESCE(actor_id, ''), COALESCE(message, ''), created_at
+		FROM guardian_certification_logs
+		WHERE certification_id=?
+		ORDER BY created_at, id`, certificationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CertificationAuditLog{}
+	for rows.Next() {
+		var item CertificationAuditLog
+		var created time.Time
+		if err := rows.Scan(&item.ID, &item.CertificationID, &item.Action, &item.ActorID, &item.Message, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = created.Format(time.RFC3339)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) insertCertificationLog(ctx context.Context, certificationID string, action string, actorID string, message string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO guardian_certification_logs (certification_id, action, actor_id, message) VALUES (?, ?, ?, ?)`, certificationID, action, actorID, message)
+	return err
+}
+
+func normalizeMobile(value string) string {
+	var builder strings.Builder
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
 }
 
 func organizationFixture() OrganizationGraphResponse {

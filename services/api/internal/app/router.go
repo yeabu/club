@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -29,10 +30,17 @@ func NewAppWithConfig(config Config) *App {
 
 	store, err := OpenStore(ctx, config)
 	if err != nil {
-		log.Printf("database unavailable, falling back to fixtures: %v", err)
-		return &App{config: config}
+		log.Fatalf("database unavailable; API requires a real database and fixture mode is disabled: %v", err)
 	}
 	return &App{config: config, store: store}
+}
+
+func dashboardReadTimeout() time.Duration {
+	seconds := envInt("DB_DASHBOARD_TIMEOUT_SECONDS", 2)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func NewRouter() http.Handler {
@@ -43,12 +51,16 @@ func NewRouterWithConfig(config Config) http.Handler {
 	app := NewAppWithConfig(config)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", app.handleHealth)
+	mux.HandleFunc("POST /api/auth/login", app.handleLogin)
 	mux.HandleFunc("GET /api/dashboard", app.handleDashboard)
 	mux.HandleFunc("GET /api/grading/subjective/reviews", app.handleSubjectiveReviewQueue)
 	mux.HandleFunc("GET /api/grading/subjective/current", app.handleCurrentSubjective)
 	mux.HandleFunc("GET /api/grading/subjective/reviews/{reviewID}", app.handleReviewSubjective)
 	mux.HandleFunc("GET /api/grading/subjective/history", app.handleSubjectiveHistory)
 	mux.HandleFunc("POST /api/grading/subjective/decision", app.handleSubjectiveDecision)
+	mux.HandleFunc("PATCH /api/grading/objective/exceptions/{exceptionID}", app.handleObjectiveExceptionDecision)
+	mux.HandleFunc("GET /api/grading/policies/default", app.handleDefaultGradingPolicy)
+	mux.HandleFunc("PUT /api/grading/policies/default", app.handleSaveDefaultGradingPolicy)
 	mux.HandleFunc("POST /api/scan/uploads", app.handleScanUpload)
 	mux.HandleFunc("GET /api/scan/tasks", app.handleScanTasks)
 	mux.HandleFunc("POST /api/scan/tasks", app.handleCreateScanTask)
@@ -58,20 +70,32 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("POST /api/scan/tasks/{taskID}/worker-result", app.handleSaveScanWorkerResult)
 	mux.HandleFunc("POST /api/scan/tasks/{taskID}/retry", app.handleRetryScanTask)
 	mux.HandleFunc("POST /api/scan/tasks/{taskID}/match", app.handleMatchScanFile)
+	mux.HandleFunc("PATCH /api/scan/tasks/{taskID}/files/status", app.handleUpdateScanFileStatus)
 	mux.HandleFunc("GET /api/scan/tasks/{taskID}/preview", app.handleScanTaskPreview)
+	mux.HandleFunc("GET /api/scan/exceptions", app.handleScanExceptions)
+	mux.HandleFunc("GET /api/papers", app.handlePapers)
+	mux.HandleFunc("DELETE /api/papers/{paperID}", app.handleDeletePaper)
 	mux.HandleFunc("GET /api/templates", app.handleTemplates)
 	mux.HandleFunc("POST /api/templates", app.handleCreateTemplate)
+	mux.HandleFunc("POST /api/template-ai-suggestions", app.handleTemplateAISuggestionsForSource)
 	mux.HandleFunc("GET /api/templates/{templateID}", app.handleTemplate)
 	mux.HandleFunc("PUT /api/templates/{templateID}", app.handleUpdateTemplate)
 	mux.HandleFunc("DELETE /api/templates/{templateID}", app.handleDeleteTemplate)
 	mux.HandleFunc("POST /api/templates/{templateID}/copy", app.handleCopyTemplate)
 	mux.HandleFunc("PUT /api/templates/{templateID}/status", app.handleUpdateTemplateStatus)
+	mux.HandleFunc("GET /api/templates/{templateID}/validation", app.handleTemplateValidation)
+	mux.HandleFunc("GET /api/templates/{templateID}/diff", app.handleTemplateDiff)
+	mux.HandleFunc("GET /api/templates/{templateID}/print", app.handleTemplatePrint)
+	mux.HandleFunc("GET /api/templates/{templateID}/export", app.handleTemplateExport)
 	mux.HandleFunc("POST /api/templates/{templateID}/ai-suggestions", app.handleTemplateAISuggestions)
 	mux.HandleFunc("GET /api/templates/{templateID}/regions", app.handleTemplateRegions)
 	mux.HandleFunc("PUT /api/templates/{templateID}/regions", app.handleSaveTemplateRegions)
 	mux.HandleFunc("POST /api/templates/{templateID}/regions", app.handleCreateTemplateRegion)
 	mux.HandleFunc("PUT /api/templates/{templateID}/regions/{regionID}", app.handleUpdateTemplateRegion)
 	mux.HandleFunc("DELETE /api/templates/{templateID}/regions/{regionID}", app.handleDeleteTemplateRegion)
+	mux.HandleFunc("POST /api/exams", app.handlePublishExam)
+	mux.HandleFunc("GET /api/exams/{examID}", app.handleExam)
+	mux.HandleFunc("PATCH /api/exams/{examID}/students/{studentID}", app.handleExamAttendance)
 	mux.HandleFunc("GET /api/analytics/classroom", app.handleClassroomAnalytics)
 	mux.HandleFunc("POST /api/analytics/generate-scores", app.handleGenerateScores)
 	mux.HandleFunc("GET /api/analytics/export/scores.csv", app.handleExportScores)
@@ -79,6 +103,7 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("GET /api/mistakes/{mistakeID}", app.handleWrongQuestion)
 	mux.HandleFunc("PATCH /api/mistakes/{mistakeID}/knowledge-points", app.handleWrongQuestionKnowledge)
 	mux.HandleFunc("POST /api/mistakes/repractice", app.handleCreateRepracticeTask)
+	mux.HandleFunc("POST /api/mistakes/repractice/{taskID}/submissions", app.handleSubmitRepracticeTask)
 	mux.HandleFunc("GET /api/learning/profile", app.handleLearningProfile)
 	mux.HandleFunc("GET /api/reports/guardian", app.handleGuardianReport)
 	mux.HandleFunc("GET /api/knowledge-points", app.handleKnowledgePoints)
@@ -97,6 +122,7 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("POST /api/guardian/certifications", app.handleGuardianCertification)
 	mux.HandleFunc("GET /api/guardian/certifications", app.handleCertificationList)
 	mux.HandleFunc("PATCH /api/guardian/certifications/{certificationID}", app.handleCertificationDecision)
+	mux.HandleFunc("GET /api/guardian/certifications/{certificationID}/logs", app.handleCertificationLogs)
 	mux.HandleFunc("GET /api/portal/student", app.handleStudentPortal)
 	mux.HandleFunc("GET /api/portal/guardian", app.handleGuardianPortal)
 	mux.HandleFunc("POST /api/ai/capabilities/{capability}/requests", app.handleAICapabilityRequest)
@@ -104,8 +130,12 @@ func NewRouterWithConfig(config Config) http.Handler {
 	mux.HandleFunc("GET /api/ai/tasks/{taskID}", app.handleAITask)
 	mux.HandleFunc("POST /api/ai/tasks/{taskID}/dispatch", app.handleDispatchAITask)
 	mux.HandleFunc("POST /api/ai/tasks/{taskID}/callback", app.handleAITaskCallback)
+	mux.HandleFunc("GET /api/ai/providers", app.handleAIProviders)
+	mux.HandleFunc("PUT /api/ai/providers/current", app.handleSaveAIProvider)
+	mux.HandleFunc("DELETE /api/ai/providers/{providerName}", app.handleDeleteAIProvider)
+	mux.HandleFunc("GET /api/system/config", app.handleSystemConfig)
+	mux.HandleFunc("PUT /api/system/config", app.handleSaveSystemConfig)
 	mux.HandleFunc("GET /api/dev/connections", app.handleDevConnections)
-	mux.HandleFunc("POST /api/dev/reset-demo", app.handleResetDemo)
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(localUploadRoot()))))
 
 	return withCORS(mux)
@@ -120,15 +150,43 @@ func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if app.store != nil {
-		data, err := app.store.Dashboard(r.Context())
-		if err == nil {
-			writeJSON(w, http.StatusOK, data)
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	timeout := dashboardReadTimeout()
+	dbCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	type dashboardResult struct {
+		data DashboardResponse
+		err  error
+	}
+	resultCh := make(chan dashboardResult, 1)
+	go func() {
+		data, err := app.store.Dashboard(dbCtx)
+		resultCh <- dashboardResult{data: data, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			writeJSON(w, http.StatusOK, result.data)
 			return
 		}
-		log.Printf("dashboard db query failed: %v", err)
+		log.Printf("dashboard db query failed: %v", result.err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "dashboard query failed"})
+	case <-time.After(timeout):
+		cancel()
+		log.Printf("dashboard db query timed out after %s", timeout)
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "dashboard query timed out"})
 	}
-	writeJSON(w, http.StatusOK, dashboardFixture())
 }
 
 func (app *App) handleScanUpload(w http.ResponseWriter, r *http.Request) {
@@ -163,15 +221,17 @@ func (app *App) handleScanUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleScanTasks(w http.ResponseWriter, r *http.Request) {
-	if app.store != nil {
-		tasks, err := app.store.ScanJobs(r.Context())
-		if err == nil {
-			writeJSON(w, http.StatusOK, ScanTaskListResponse{Tasks: tasks})
-			return
-		}
-		log.Printf("scan tasks query failed: %v", err)
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
 	}
-	writeJSON(w, http.StatusOK, ScanTaskListResponse{Tasks: dashboardFixture().ScanQueue})
+	tasks, err := app.store.ScanJobs(r.Context())
+	if err != nil {
+		log.Printf("scan tasks query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan tasks query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ScanTaskListResponse{Tasks: tasks})
 }
 
 func (app *App) handleScanTask(w http.ResponseWriter, r *http.Request) {
@@ -180,32 +240,127 @@ func (app *App) handleScanTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "taskID is required"})
 		return
 	}
-	if app.store != nil {
-		task, err := app.store.ScanTask(r.Context(), taskID)
-		if err == nil {
-			writeJSON(w, http.StatusOK, ScanTaskResponse{Status: "ok", Task: task})
-			return
-		}
-		if err == sql.ErrNoRows {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan task not found"})
-			return
-		}
-		log.Printf("scan task query failed: %v", err)
-	}
-	for _, task := range dashboardFixture().ScanQueue {
-		if task.ID == taskID {
-			writeJSON(w, http.StatusOK, ScanTaskResponse{Status: "ok", Task: task})
-			return
-		}
-	}
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan task not found"})
-}
-
-func (app *App) handleCreateScanTask(w http.ResponseWriter, r *http.Request) {
 	if app.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
 		return
 	}
+	task, err := app.store.ScanTask(r.Context(), taskID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, ScanTaskResponse{Status: "ok", Task: task})
+		return
+	}
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "scan task not found"})
+		return
+	}
+	log.Printf("scan task query failed: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan task query failed"})
+}
+
+func (app *App) handlePapers(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	items, err := app.store.Papers(r.Context())
+	if err != nil {
+		log.Printf("papers query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "papers query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, PaperManagementResponse{Items: items})
+}
+
+func (app *App) handleDeletePaper(w http.ResponseWriter, r *http.Request) {
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if !hasRole(auth, "教务管理员", "任课教师") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	paperID := strings.TrimSpace(r.PathValue("paperID"))
+	if paperID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "paper id is required"})
+		return
+	}
+	_, files, err := app.store.Paper(r.Context(), paperID)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "paper not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("paper query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "paper query failed"})
+		return
+	}
+	deletedKeys := []string{}
+	for _, file := range files {
+		if strings.TrimSpace(file.Key) == "" {
+			continue
+		}
+		if err := deleteStoredScanFile(app.config, file); err != nil {
+			log.Printf("paper object delete failed: paper=%s key=%s err=%v", paperID, file.Key, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "paper object delete failed", "detail": err.Error()})
+			return
+		}
+		deletedKeys = append(deletedKeys, file.Key)
+	}
+	if err := app.store.DeletePaper(r.Context(), paperID, files); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "paper not found"})
+			return
+		}
+		log.Printf("paper delete failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "paper delete failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, PaperDeleteResponse{Status: "deleted", DeletedID: paperID, DeletedKeys: deletedKeys})
+}
+
+func (app *App) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
+		return
+	}
+	config, err := app.store.SystemConfig(r.Context())
+	if err != nil {
+		log.Printf("system config query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "system config query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (app *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
+		return
+	}
+	var req SystemConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	saved, err := app.store.SaveSystemConfig(r.Context(), req)
+	if err != nil {
+		log.Printf("system config save failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "system config save failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (app *App) handleCreateScanTask(w http.ResponseWriter, r *http.Request) {
 	var req ScanTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
@@ -214,8 +369,44 @@ func (app *App) handleCreateScanTask(w http.ResponseWriter, r *http.Request) {
 	req.Title = strings.TrimSpace(req.Title)
 	req.ClassName = strings.TrimSpace(req.ClassName)
 	req.ScanType = normalizeScanType(req.ScanType)
+	req.AssignmentID = strings.TrimSpace(req.AssignmentID)
+	req.ExamID = strings.TrimSpace(req.ExamID)
 	req.TemplateID = strings.TrimSpace(req.TemplateID)
 	req.Notes = strings.TrimSpace(req.Notes)
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	if req.ExamID != "" {
+		exam, err := app.store.Exam(r.Context(), req.ExamID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "exam not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exam query failed"})
+			return
+		}
+		if exam.Status != "published" && exam.Status != "ended" && exam.Status != "scanning" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "scan task must bind a published or ended exam"})
+			return
+		}
+		req.Title = exam.Name
+		req.ClassName = exam.ClassName
+		req.TemplateID = exam.TemplateID
+		req.TemplateVersion = exam.TemplateVersion
+		if assignmentID, err := app.store.AssignmentIDForExam(r.Context(), exam.ID); err == nil {
+			req.AssignmentID = assignmentID
+		}
+	}
 	if req.Title == "" || req.ClassName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title and className are required"})
 		return
@@ -594,9 +785,24 @@ func (app *App) handleSubjectiveDecision(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if app.store != nil {
+		auth, err := app.requestAuth(r.Context(), r)
+		if err != nil || !requireAuth(w, auth) {
+			return
+		}
+		if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+			return
+		}
+		if req.ActorName == "" {
+			req.ActorName = auth.UserID
+		}
 		data, err := app.store.SaveSubjectiveDecision(r.Context(), req)
 		if err == nil {
 			writeJSON(w, http.StatusOK, data)
+			return
+		}
+		if strings.Contains(err.Error(), "final score") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		log.Printf("subjective decision db write failed: %v", err)
@@ -608,16 +814,92 @@ func (app *App) handleSubjectiveDecision(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (app *App) handleTemplates(w http.ResponseWriter, r *http.Request) {
-	if app.store != nil {
-		data, err := app.store.Templates(r.Context())
-		if err == nil {
-			writeJSON(w, http.StatusOK, data)
+func (app *App) handleObjectiveExceptionDecision(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("exceptionID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid exception id"})
+		return
+	}
+	var req ObjectiveReviewDecisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, ObjectiveReviewDecisionResponse{Status: "resolved", Exception: ObjectiveReviewException{ID: id, Status: "resolved", SuggestedScore: req.Score}})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	item, err := app.store.ResolveObjectiveException(r.Context(), id, req)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "objective exception not found"})
 			return
 		}
-		log.Printf("templates db query failed: %v", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
-	writeJSON(w, http.StatusOK, templatesFixture())
+	writeJSON(w, http.StatusOK, ObjectiveReviewDecisionResponse{Status: item.Status, Exception: item})
+}
+
+func (app *App) handleDefaultGradingPolicy(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, defaultAutoGradingPolicy())
+		return
+	}
+	policy, err := app.store.DefaultGradingPolicy(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "grading policy query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, policy)
+}
+
+func (app *App) handleSaveDefaultGradingPolicy(w http.ResponseWriter, r *http.Request) {
+	var req AutoGradingPolicy
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, normalizePolicy(&req))
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	policy, err := app.store.SaveDefaultGradingPolicy(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "grading policy save failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, policy)
+}
+
+func (app *App) handleTemplates(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	data, err := app.store.Templates(r.Context())
+	if err != nil {
+		log.Printf("templates db query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "templates query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (app *App) handleTemplate(w http.ResponseWriter, r *http.Request) {
@@ -626,25 +908,21 @@ func (app *App) handleTemplate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "templateID is required"})
 		return
 	}
-	if app.store != nil {
-		data, err := app.store.Template(r.Context(), templateID)
-		if err == nil {
-			writeJSON(w, http.StatusOK, data)
-			return
-		}
-		if err == sql.ErrNoRows {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
-			return
-		}
-		log.Printf("template db query failed: %v", err)
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
 	}
-	for _, template := range templatesFixture() {
-		if template.ID == templateID {
-			writeJSON(w, http.StatusOK, template)
-			return
-		}
+	data, err := app.store.Template(r.Context(), templateID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, data)
+		return
 	}
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+		return
+	}
+	log.Printf("template db query failed: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template query failed"})
 }
 
 func (app *App) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
@@ -766,6 +1044,11 @@ func (app *App) handleUpdateTemplateStatus(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
 			return
 		}
+		if err == errTemplateValidationFailed {
+			validation, _ := app.store.ValidateTemplateByID(r.Context(), templateID)
+			writeJSON(w, http.StatusConflict, validation)
+			return
+		}
 		log.Printf("template status update failed: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template status update failed"})
 		return
@@ -774,6 +1057,10 @@ func (app *App) handleUpdateTemplateStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (app *App) handleTemplateAISuggestions(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
 	templateID := r.PathValue("templateID")
 	if templateID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "templateID is required"})
@@ -785,28 +1072,15 @@ func (app *App) handleTemplateAISuggestions(w http.ResponseWriter, r *http.Reque
 	}
 	var template PaperTemplate
 	var err error
-	if app.store != nil {
-		template, err = app.store.Template(r.Context(), templateID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
-				return
-			}
-			log.Printf("template ai suggestion query failed: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template query failed"})
-			return
-		}
-	} else {
-		for _, item := range templatesFixture() {
-			if item.ID == templateID {
-				template = item
-				break
-			}
-		}
-		if template.ID == "" {
+	template, err = app.store.Template(r.Context(), templateID)
+	if err != nil {
+		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
 			return
 		}
+		log.Printf("template ai suggestion query failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template query failed"})
+		return
 	}
 	if req.PaperName == "" {
 		req.PaperName = template.Name
@@ -814,7 +1088,67 @@ func (app *App) handleTemplateAISuggestions(w http.ResponseWriter, r *http.Reque
 	if req.SourceFileURL == "" {
 		req.SourceFileURL = template.SourceFileURL
 	}
-	writeJSON(w, http.StatusOK, templateAISuggestionFixture(template, req))
+	suggestion, err := app.templateAISuggestions(r.Context(), template, req)
+	if errors.Is(err, errAIProviderConfigRequired) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "ai provider is not configured"})
+		return
+	}
+	if err != nil {
+		log.Printf("template ai suggestion provider failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai provider request failed", "detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, suggestion)
+}
+
+func (app *App) handleTemplateAISuggestionsForSource(w http.ResponseWriter, r *http.Request) {
+	var req TemplateAISuggestionRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	template := PaperTemplate{
+		ID:            "tpl_ai_source",
+		Name:          strings.TrimSpace(req.PaperName),
+		Subject:       strings.TrimSpace(req.Subject),
+		Grade:         strings.TrimSpace(req.Grade),
+		TotalScore:    req.TargetScore,
+		SourceFileURL: strings.TrimSpace(req.SourceFileURL),
+		Status:        "draft",
+		Version:       1,
+	}
+	if template.Name == "" {
+		template.Name = "未命名试卷"
+	}
+	suggestion, err := app.templateAISuggestions(r.Context(), template, req)
+	if errors.Is(err, errAIProviderConfigRequired) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "ai provider is not configured"})
+		return
+	}
+	if err != nil {
+		log.Printf("template ai suggestion provider failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai provider request failed", "detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, suggestion)
+}
+
+func (app *App) templateAISuggestions(ctx context.Context, template PaperTemplate, req TemplateAISuggestionRequest) (TemplateAISuggestionResponse, error) {
+	if req.PaperName == "" {
+		req.PaperName = template.Name
+	}
+	if req.SourceFileURL == "" {
+		req.SourceFileURL = template.SourceFileURL
+	}
+	if req.Subject == "" {
+		req.Subject = template.Subject
+	}
+	if req.Grade == "" {
+		req.Grade = template.Grade
+	}
+	if req.TargetScore == 0 {
+		req.TargetScore = template.TotalScore
+	}
+	return app.generateTemplateAISuggestionWithProvider(ctx, template, req)
 }
 
 func (app *App) handleTemplateRegions(w http.ResponseWriter, r *http.Request) {
@@ -823,25 +1157,21 @@ func (app *App) handleTemplateRegions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "templateID is required"})
 		return
 	}
-	if app.store != nil {
-		data, err := app.store.Template(r.Context(), templateID)
-		if err == nil {
-			writeJSON(w, http.StatusOK, data.Questions)
-			return
-		}
-		if err == sql.ErrNoRows {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
-			return
-		}
-		log.Printf("template regions db query failed: %v", err)
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
 	}
-	for _, template := range templatesFixture() {
-		if template.ID == templateID {
-			writeJSON(w, http.StatusOK, template.Questions)
-			return
-		}
+	data, err := app.store.Template(r.Context(), templateID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, data.Questions)
+		return
 	}
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "template not found"})
+		return
+	}
+	log.Printf("template regions db query failed: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "template regions query failed"})
 }
 
 func (app *App) handleSaveTemplateRegions(w http.ResponseWriter, r *http.Request) {
@@ -967,16 +1297,142 @@ func (app *App) handleDeleteTemplateRegion(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, TemplateMutationResponse{Status: "deleted", Template: template})
 }
 
-func (app *App) handleClassroomAnalytics(w http.ResponseWriter, r *http.Request) {
-	if app.store != nil {
-		data, err := app.store.ClassroomAnalytics(r.Context())
-		if err == nil {
-			writeJSON(w, http.StatusOK, data)
+func (app *App) handlePublishExam(w http.ResponseWriter, r *http.Request) {
+	var req ExamPublishRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusCreated, ExamRecord{ID: fmt.Sprintf("exam_%d", time.Now().UnixMilli()), Name: req.Name, SchoolID: req.SchoolID, Subject: req.Subject, Grade: req.Grade, ClassID: req.ClassID, TeacherID: req.TeacherID, TemplateID: req.TemplateID, Status: "published", RosterLocked: true, GradingPolicy: normalizePolicy(req.GradingPolicy)})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	if req.SchoolID == "" {
+		req.SchoolID = auth.SchoolID
+	}
+	if req.TeacherID == "" {
+		req.TeacherID = auth.TeacherID
+	}
+	exam, err := app.store.PublishExam(r.Context(), req)
+	if err != nil {
+		if err == errTemplateNotPublished {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "exam must bind a published template"})
 			return
 		}
-		log.Printf("classroom analytics db query failed: %v", err)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "referenced template, class or student not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
-	writeJSON(w, http.StatusOK, analyticsFixture())
+	writeJSON(w, http.StatusCreated, exam)
+}
+
+func (app *App) handleExam(w http.ResponseWriter, r *http.Request) {
+	examID := r.PathValue("examID")
+	if examID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "examID is required"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, ExamRecord{ID: examID, Name: "六年级数学期中卷", Status: "published", TemplateID: "tpl_001", TemplateVersion: 1, RosterLocked: true, GradingPolicy: defaultAutoGradingPolicy()})
+		return
+	}
+	exam, err := app.store.Exam(r.Context(), examID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "exam not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exam query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, exam)
+}
+
+func (app *App) handleExamAttendance(w http.ResponseWriter, r *http.Request) {
+	examID := r.PathValue("examID")
+	studentID := r.PathValue("studentID")
+	if examID == "" || studentID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "examID and studentID are required"})
+		return
+	}
+	var req ExamAttendanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusOK, ExamRecord{ID: examID, Status: "published", RosterLocked: true, Students: []ExamStudent{{StudentID: studentID, Status: req.Status}}, GradingPolicy: defaultAutoGradingPolicy()})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	exam, err := app.store.UpdateExamAttendance(r.Context(), examID, studentID, req)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "exam student not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, exam)
+}
+
+func (app *App) handleClassroomAnalytics(w http.ResponseWriter, r *http.Request) {
+	if app.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
+	timeout := dashboardReadTimeout()
+	dbCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	type analyticsResult struct {
+		data ClassroomAnalytics
+		err  error
+	}
+	resultCh := make(chan analyticsResult, 1)
+	go func() {
+		data, err := app.store.ClassroomAnalytics(dbCtx)
+		resultCh <- analyticsResult{data: data, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			writeJSON(w, http.StatusOK, result.data)
+			return
+		}
+		log.Printf("classroom analytics db query failed: %v", result.err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "classroom analytics query failed"})
+	case <-time.After(timeout):
+		cancel()
+		log.Printf("classroom analytics db query timed out after %s", timeout)
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "classroom analytics query timed out"})
+	}
 }
 
 func (app *App) handleGenerateScores(w http.ResponseWriter, r *http.Request) {
@@ -984,9 +1440,23 @@ func (app *App) handleGenerateScores(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
 		return
 	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+		return
+	}
 	className := strings.TrimSpace(r.URL.Query().Get("className"))
 	result, err := app.store.GenerateExamScores(r.Context(), className)
 	if err != nil {
+		if err == errPendingReviewBlocksScores {
+			result.Blocked = true
+			result.Reason = "pending objective or subjective reviews must be resolved before score generation"
+			writeJSON(w, http.StatusConflict, result)
+			return
+		}
 		log.Printf("generate scores failed: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "generate scores failed"})
 		return
@@ -1029,6 +1499,38 @@ func (app *App) handleWrongQuestions(w http.ResponseWriter, r *http.Request) {
 		Search:      strings.TrimSpace(r.URL.Query().Get("search")),
 	}
 	if app.store != nil {
+		auth, err := app.requestAuth(r.Context(), r)
+		if err != nil || !requireAuth(w, auth) {
+			return
+		}
+		if auth.StudentID != "" || auth.GuardianID != "" {
+			studentID := auth.StudentID
+			if auth.GuardianID != "" {
+				studentID = strings.TrimSpace(r.URL.Query().Get("studentId"))
+			}
+			if studentID == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "studentId is required"})
+				return
+			}
+			allowed, err := app.store.CanAccessStudent(r.Context(), auth, studentID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "student scope check failed"})
+				return
+			}
+			if !allowed {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "student is outside current user scope"})
+				return
+			}
+			studentName, err := app.store.StudentName(r.Context(), studentID)
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "student not found"})
+				return
+			}
+			filters.StudentName = studentName
+		} else if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+			return
+		}
 		items, err := app.store.WrongQuestions(r.Context(), filters)
 		if err == nil {
 			writeJSON(w, http.StatusOK, WrongQuestionListResponse{Items: items})
@@ -1083,9 +1585,56 @@ func (app *App) handleCreateRepracticeTask(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, RepracticeTaskResponse{Status: "created", TaskID: fmt.Sprintf("repractice_%d", time.Now().UnixMilli()), LinkedCount: len(req.WrongQuestionIDs), Knowledge: []string{}})
 }
 
+func (app *App) handleSubmitRepracticeTask(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("taskID")
+	if taskID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "taskID is required"})
+		return
+	}
+	var req RepracticeSubmissionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if app.store == nil {
+		writeJSON(w, http.StatusCreated, RepracticeSubmissionResponse{Status: "submitted", TaskID: taskID, Submitted: len(req.Answers)})
+		return
+	}
+	auth, err := app.requestAuth(r.Context(), r)
+	if err != nil || !requireAuth(w, auth) {
+		return
+	}
+	if req.StudentID == "" {
+		req.StudentID = auth.StudentID
+	}
+	allowed, err := app.store.CanAccessStudent(r.Context(), auth, req.StudentID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "student scope check failed"})
+		return
+	}
+	if !allowed {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "student is outside current user scope"})
+		return
+	}
+	result, err := app.store.SubmitRepractice(r.Context(), taskID, req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
 func (app *App) handleLearningProfile(w http.ResponseWriter, r *http.Request) {
 	className := strings.TrimSpace(r.URL.Query().Get("className"))
 	if app.store != nil {
+		auth, err := app.requestAuth(r.Context(), r)
+		if err != nil || !requireAuth(w, auth) {
+			return
+		}
+		if auth.TeacherID == "" && !hasRole(auth, "教务管理员") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "teacher role is required"})
+			return
+		}
 		data, err := app.store.LearningProfile(r.Context(), className)
 		if err == nil {
 			writeJSON(w, http.StatusOK, data)
@@ -1099,6 +1648,32 @@ func (app *App) handleLearningProfile(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleGuardianReport(w http.ResponseWriter, r *http.Request) {
 	studentName := strings.TrimSpace(r.URL.Query().Get("studentName"))
 	if app.store != nil {
+		auth, err := app.requestAuth(r.Context(), r)
+		if err != nil || !requireAuth(w, auth) {
+			return
+		}
+		studentID := strings.TrimSpace(r.URL.Query().Get("studentId"))
+		if studentID == "" {
+			studentID = auth.StudentID
+		}
+		if studentID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "studentId is required"})
+			return
+		}
+		allowed, err := app.store.CanAccessStudent(r.Context(), auth, studentID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "student scope check failed"})
+			return
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "student is outside current user scope"})
+			return
+		}
+		studentName, err = app.store.StudentName(r.Context(), studentID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "student not found"})
+			return
+		}
 		data, err := app.store.GuardianReport(r.Context(), studentName)
 		if err == nil {
 			writeJSON(w, http.StatusOK, data)
@@ -1113,28 +1688,10 @@ func (app *App) handleDevConnections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CheckDevConnections(app.config))
 }
 
-func (app *App) handleResetDemo(w http.ResponseWriter, r *http.Request) {
-	if app.config.AppEnv == "production" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "reset demo is disabled in production"})
-		return
-	}
-	if app.store == nil {
-		writeJSON(w, http.StatusOK, dashboardFixture())
-		return
-	}
-	data, err := app.store.ResetDemo(r.Context())
-	if err != nil {
-		log.Printf("reset demo failed: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reset demo failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, data)
-}
-
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-ID, X-School-ID, X-Role, X-Student-ID, X-Guardian-ID, X-Teacher-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

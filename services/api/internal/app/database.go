@@ -121,6 +121,7 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 	}{
 		{table: "users", column: "school_id", definition: "VARCHAR(40) NOT NULL DEFAULT '' AFTER id"},
 		{table: "users", column: "email", definition: "VARCHAR(120) DEFAULT '' AFTER mobile"},
+		{table: "users", column: "password_hash", definition: "CHAR(64) DEFAULT '' AFTER email"},
 		{table: "users", column: "status", definition: "VARCHAR(30) NOT NULL DEFAULT 'active' AFTER email"},
 		{table: "knowledge_points", column: "school_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
 		{table: "knowledge_points", column: "grade_id", definition: "VARCHAR(40) DEFAULT '' AFTER school_id"},
@@ -136,6 +137,11 @@ func (s *Store) ensureSchemaPatchColumns(ctx context.Context) error {
 		{table: "students", column: "student_no", definition: "VARCHAR(40) DEFAULT '' AFTER class_id"},
 		{table: "teachers", column: "user_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
 		{table: "teachers", column: "role", definition: "VARCHAR(40) DEFAULT 'subject_teacher' AFTER subject"},
+		{table: "exams", column: "class_id", definition: "VARCHAR(40) DEFAULT '' AFTER grade"},
+		{table: "exams", column: "teacher_id", definition: "VARCHAR(40) DEFAULT '' AFTER class_id"},
+		{table: "exams", column: "max_score", definition: "DECIMAL(8,2) NOT NULL DEFAULT 0 AFTER status"},
+		{table: "exams", column: "roster_locked_at", definition: "DATETIME NULL AFTER max_score"},
+		{table: "exams", column: "grading_policy_json", definition: "JSON NULL AFTER roster_locked_at"},
 		{table: "assignments", column: "exam_id", definition: "VARCHAR(40) DEFAULT '' AFTER id"},
 		{table: "assignments", column: "kind", definition: "VARCHAR(40) NOT NULL DEFAULT 'exam' AFTER title"},
 		{table: "assignments", column: "class_id", definition: "VARCHAR(40) DEFAULT '' AFTER kind"},
@@ -302,6 +308,120 @@ func (s *Store) ScanTask(ctx context.Context, taskID string) (ScanJob, error) {
 	return job, nil
 }
 
+func (s *Store) Papers(ctx context.Context) ([]PaperManagementItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(files_json, JSON_ARRAY()),
+			status, progress, created_at
+		FROM scan_jobs
+			WHERE scan_type = 'paper'
+				AND JSON_LENGTH(COALESCE(files_json, JSON_ARRAY())) > 0
+		ORDER BY created_at DESC
+		LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	templates, err := s.Templates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	templateByID := map[string]PaperTemplate{}
+	templateBySource := map[string]PaperTemplate{}
+	for _, template := range templates {
+		templateByID[template.ID] = template
+		if strings.TrimSpace(template.SourceFileURL) != "" {
+			templateBySource[strings.TrimSpace(template.SourceFileURL)] = template
+		}
+	}
+
+	items := []PaperManagementItem{}
+	for rows.Next() {
+		var item PaperManagementItem
+		var filesJSON string
+		var createdAt time.Time
+		if err := rows.Scan(&item.ID, &item.Title, &item.ClassName, &item.TemplateID, &item.TemplateVersion, &item.Pages, &filesJSON, &item.Status, &item.Progress, &createdAt); err != nil {
+			return nil, err
+		}
+		item.ImportedAt = createdAt.Format(time.RFC3339)
+		var files []ScanFile
+		decodeScanFiles(filesJSON, &files)
+		if len(files) > 0 {
+			item.SourceFileURL = files[0].URL
+			item.SourceFileKey = files[0].Key
+			item.FileName = files[0].FileName
+		}
+		if template, ok := templateByID[item.TemplateID]; ok {
+			copy := template
+			item.Template = &copy
+		} else if template, ok := templateBySource[item.SourceFileURL]; ok {
+			copy := template
+			item.Template = &copy
+			item.TemplateID = template.ID
+			item.TemplateVersion = template.Version
+		} else if template, ok := templateBySource[item.SourceFileKey]; ok {
+			copy := template
+			item.Template = &copy
+			item.TemplateID = template.ID
+			item.TemplateVersion = template.Version
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) Paper(ctx context.Context, paperID string) (PaperManagementItem, []ScanFile, error) {
+	var item PaperManagementItem
+	var filesJSON string
+	var createdAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, title, class_name, template_id, template_version, pages, COALESCE(files_json, JSON_ARRAY()),
+			status, progress, created_at
+		FROM scan_jobs
+		WHERE id = ? AND scan_type = 'paper'
+		LIMIT 1`, paperID).Scan(&item.ID, &item.Title, &item.ClassName, &item.TemplateID, &item.TemplateVersion, &item.Pages, &filesJSON, &item.Status, &item.Progress, &createdAt)
+	if err != nil {
+		return PaperManagementItem{}, nil, err
+	}
+	item.ImportedAt = createdAt.Format(time.RFC3339)
+	files := []ScanFile{}
+	decodeScanFiles(filesJSON, &files)
+	if len(files) > 0 {
+		item.SourceFileURL = files[0].URL
+		item.SourceFileKey = files[0].Key
+		item.FileName = files[0].FileName
+	}
+	return item, files, nil
+}
+
+func (s *Store) DeletePaper(ctx context.Context, paperID string, files []ScanFile) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM scan_jobs WHERE id = ? AND scan_type = 'paper'`, paperID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	for _, file := range files {
+		if strings.TrimSpace(file.Key) == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM object_files WHERE object_key = ?`, file.Key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJob, error) {
 	req.ScanType = normalizeScanType(req.ScanType)
 	templateVersion := req.TemplateVersion
@@ -336,9 +456,9 @@ func (s *Store) CreateScanTask(ctx context.Context, req ScanTaskRequest) (ScanJo
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scan_jobs
-			(id, scan_type, title, class_name, template_id, template_version, pages, notes, files_json, status, progress, failure_reason, retry_count, queue_status, queue_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, '')`,
-		job.ID, job.ScanType, job.Title, job.ClassName, job.TemplateID, job.TemplateVersion, job.Pages, job.Notes, string(filesJSON), job.Status, job.Progress, job.QueueStatus,
+			(id, assignment_id, scan_type, title, class_name, template_id, template_version, pages, notes, files_json, status, progress, failure_reason, retry_count, queue_status, queue_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, '')`,
+		job.ID, req.AssignmentID, job.ScanType, job.Title, job.ClassName, job.TemplateID, job.TemplateVersion, job.Pages, job.Notes, string(filesJSON), job.Status, job.Progress, job.QueueStatus,
 	)
 	if err != nil {
 		return ScanJob{}, err
@@ -574,6 +694,10 @@ func (s *Store) persistObjectiveResultsFromWorker(ctx context.Context, tx *sql.T
 	if err := questionRows.Err(); err != nil {
 		return err
 	}
+	policy, err := s.DefaultGradingPolicy(ctx)
+	if err != nil {
+		policy = defaultAutoGradingPolicy()
+	}
 	for _, submission := range submissions {
 		for _, answer := range answers {
 			question, ok := questions[answer.QuestionNo]
@@ -601,15 +725,7 @@ func (s *Store) persistObjectiveResultsFromWorker(ctx context.Context, tx *sql.T
 			); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
-				VALUES (?, ?, ?, ?, ?, 'omr', 'final')
-				ON DUPLICATE KEY UPDATE score = VALUES(score), max_score = VALUES(max_score), source = VALUES(source), status = VALUES(status), updated_at = CURRENT_TIMESTAMP`,
-				submission.id, question.id, question.no, score, question.score,
-			); err != nil {
-				return err
-			}
-			if answer.Confidence < 80 || studentAnswer == "" {
+			if answer.Confidence < policy.ObjectiveMinConfidence || studentAnswer == "" {
 				reason := "低置信度客观题需人工确认"
 				if studentAnswer == "" {
 					reason = "未识别到客观题答案"
@@ -622,6 +738,15 @@ func (s *Store) persistObjectiveResultsFromWorker(ctx context.Context, tx *sql.T
 				); err != nil {
 					return err
 				}
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
+				VALUES (?, ?, ?, ?, ?, 'omr', 'final')
+				ON DUPLICATE KEY UPDATE score = VALUES(score), max_score = VALUES(max_score), source = VALUES(source), status = VALUES(status), updated_at = CURRENT_TIMESTAMP`,
+				submission.id, question.id, question.no, score, question.score,
+			); err != nil {
+				return err
 			}
 		}
 	}
@@ -1304,6 +1429,9 @@ func (s *Store) SaveSubjectiveDecision(ctx context.Context, req GradingDecisionR
 	if err != nil {
 		return GradingDecisionResponse{}, err
 	}
+	if req.FinalScore < 0 || req.FinalScore > review.FullScore {
+		return GradingDecisionResponse{}, fmt.Errorf("final score %.1f is outside question range 0-%.1f", req.FinalScore, review.FullScore)
+	}
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO grading_decisions (submission_id, question_id, final_score, decision, teacher_note)
@@ -1512,6 +1640,270 @@ func (s *Store) Templates(ctx context.Context) ([]PaperTemplate, error) {
 	return templates, rows.Err()
 }
 
+func (s *Store) ActiveAIProvider(ctx context.Context) (AIProviderSetting, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, display_name, base_url, model, COALESCE(api_key, ''), timeout_seconds, COALESCE(callback_secret, ''), active, updated_at
+		FROM ai_provider_settings
+		WHERE active = TRUE
+		ORDER BY updated_at DESC
+		LIMIT 1`)
+	return scanAIProviderSetting(row)
+}
+
+func (s *Store) AIProviderSettings(ctx context.Context) ([]AIProviderSetting, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, display_name, base_url, model, COALESCE(api_key, ''), timeout_seconds, COALESCE(callback_secret, ''), active, updated_at
+		FROM ai_provider_settings
+		ORDER BY active DESC, updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AIProviderSetting{}
+	for rows.Next() {
+		item, err := scanAIProviderSetting(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) SaveAIProviderSetting(ctx context.Context, req AIProviderSettingRequest) (AIProviderSetting, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "generic-http"
+	}
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" {
+		displayName = name
+	}
+	timeoutSeconds := req.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 30
+	}
+	apiKey := strings.TrimSpace(req.APIKey)
+	callbackSecret := strings.TrimSpace(req.CallbackSecret)
+	if req.KeepExistingKey || apiKey == "" {
+		existing, err := s.aiProviderByName(ctx, name)
+		if err == nil {
+			if apiKey == "" {
+				apiKey = existing.APIKey
+			}
+			if callbackSecret == "" {
+				callbackSecret = existing.CallbackSecret
+			}
+		} else if err != sql.ErrNoRows {
+			return AIProviderSetting{}, err
+		}
+	}
+	setting := AIProviderSetting{
+		ID:             "aip_" + name,
+		Name:           name,
+		DisplayName:    displayName,
+		BaseURL:        strings.TrimSpace(req.BaseURL),
+		Model:          strings.TrimSpace(req.Model),
+		APIKey:         apiKey,
+		TimeoutSeconds: timeoutSeconds,
+		CallbackSecret: callbackSecret,
+		Active:         true,
+	}
+	config := AIProviderConfig{
+		Name:           setting.Name,
+		BaseURL:        setting.BaseURL,
+		APIKey:         setting.APIKey,
+		Model:          setting.Model,
+		TimeoutSeconds: setting.TimeoutSeconds,
+		CallbackSecret: setting.CallbackSecret,
+	}
+	normalizeAIProviderConfig(&config)
+	setting.Name = config.Name
+	setting.ID = "aip_" + setting.Name
+	setting.BaseURL = config.BaseURL
+	setting.Model = config.Model
+	setting.APIKey = config.APIKey
+	setting.TimeoutSeconds = config.TimeoutSeconds
+	setting.CallbackSecret = config.CallbackSecret
+	if setting.BaseURL == "" || setting.Model == "" {
+		return AIProviderSetting{}, fmt.Errorf("baseUrl and model are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AIProviderSetting{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE ai_provider_settings SET active = FALSE`); err != nil {
+		return AIProviderSetting{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ai_provider_settings
+			(id, name, display_name, base_url, model, api_key, timeout_seconds, callback_secret, active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE)
+		ON DUPLICATE KEY UPDATE
+			display_name = VALUES(display_name),
+			base_url = VALUES(base_url),
+			model = VALUES(model),
+			api_key = VALUES(api_key),
+			timeout_seconds = VALUES(timeout_seconds),
+			callback_secret = VALUES(callback_secret),
+			active = TRUE,
+			updated_at = CURRENT_TIMESTAMP`,
+		setting.ID, setting.Name, setting.DisplayName, setting.BaseURL, setting.Model, setting.APIKey, setting.TimeoutSeconds, setting.CallbackSecret,
+	); err != nil {
+		return AIProviderSetting{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AIProviderSetting{}, err
+	}
+	return s.ActiveAIProvider(ctx)
+}
+
+func (s *Store) DeleteAIProviderSetting(ctx context.Context, name string) (AIProviderSetting, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return AIProviderSetting{}, sql.ErrNoRows
+	}
+	existing, err := s.aiProviderByName(ctx, name)
+	if err != nil {
+		return AIProviderSetting{}, err
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM ai_provider_settings WHERE name = ?`, name)
+	if err != nil {
+		return AIProviderSetting{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return AIProviderSetting{}, err
+	}
+	if affected == 0 {
+		return AIProviderSetting{}, sql.ErrNoRows
+	}
+	return existing, nil
+}
+
+func (s *Store) SystemConfig(ctx context.Context) (SystemConfig, error) {
+	config := s.defaultSystemConfig()
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT setting_json FROM system_settings WHERE setting_key = 'global' LIMIT 1`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return config, nil
+	}
+	if err != nil {
+		return SystemConfig{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		return SystemConfig{}, err
+	}
+	config.Storage.AccessKeyProvided = config.Storage.AccessKey != "" || s.config.OBS.AccessKeyID != "" || s.config.MinIO.AccessKey != ""
+	config.Storage.SecretKeyProvided = config.Storage.SecretKey != "" || s.config.OBS.SecretAccessKey != "" || s.config.MinIO.SecretKey != ""
+	config.Storage.AccessKey = ""
+	config.Storage.SecretKey = ""
+	return config, nil
+}
+
+func (s *Store) SaveSystemConfig(ctx context.Context, req SystemConfig) (SystemConfig, error) {
+	current, err := s.SystemConfig(ctx)
+	if err != nil {
+		return SystemConfig{}, err
+	}
+	stored := s.defaultSystemConfig()
+	var storedRaw string
+	if err := s.db.QueryRowContext(ctx, `SELECT setting_json FROM system_settings WHERE setting_key = 'global' LIMIT 1`).Scan(&storedRaw); err == nil {
+		_ = json.Unmarshal([]byte(storedRaw), &stored)
+	} else if err != sql.ErrNoRows {
+		return SystemConfig{}, err
+	}
+	if strings.TrimSpace(req.Storage.AccessKey) == "" && req.Storage.KeepExistingSecret {
+		req.Storage.AccessKey = stored.Storage.AccessKey
+	}
+	if strings.TrimSpace(req.Storage.SecretKey) == "" && req.Storage.KeepExistingSecret {
+		req.Storage.SecretKey = stored.Storage.SecretKey
+	}
+	if strings.TrimSpace(req.Storage.Driver) == "" {
+		req.Storage.Driver = current.Storage.Driver
+	}
+	if req.Storage.MaxUploadMB <= 0 {
+		req.Storage.MaxUploadMB = current.Storage.MaxUploadMB
+	}
+	if len(req.Roles) == 0 {
+		req.Roles = current.Roles
+	}
+	if len(req.VIP) == 0 {
+		req.VIP = current.VIP
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return SystemConfig{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO system_settings (setting_key, setting_json)
+		VALUES ('global', ?)
+		ON DUPLICATE KEY UPDATE setting_json = VALUES(setting_json), updated_at = CURRENT_TIMESTAMP`, string(raw)); err != nil {
+		return SystemConfig{}, err
+	}
+	return s.SystemConfig(ctx)
+}
+
+func (s *Store) defaultSystemConfig() SystemConfig {
+	storage := SystemStorageConfig{
+		Driver:        s.config.StorageDriver,
+		MaxUploadMB:   25,
+		PublicBaseURL: "",
+	}
+	if storage.Driver == "obs" {
+		storage.Endpoint = s.config.OBS.Endpoint
+		storage.Bucket = s.config.OBS.Bucket
+		storage.Region = s.config.OBS.Region
+		storage.AccessKeyProvided = s.config.OBS.AccessKeyID != ""
+		storage.SecretKeyProvided = s.config.OBS.SecretAccessKey != ""
+	} else {
+		storage.Endpoint = s.config.MinIO.Endpoint
+		storage.Bucket = s.config.MinIO.Bucket
+		storage.AccessKeyProvided = s.config.MinIO.AccessKey != ""
+		storage.SecretKeyProvided = s.config.MinIO.SecretKey != ""
+	}
+	return SystemConfig{
+		Storage: storage,
+		Roles: []SystemRoleConfig{
+			{Key: "admin", Name: "教务管理员", Description: "系统配置、组织、试卷和答题卡管理", Permissions: []string{"system:write", "paper:delete", "template:delete"}, Enabled: true},
+			{Key: "teacher", Name: "任课教师", Description: "导入试卷、生成答题卡、阅卷和学情", Permissions: []string{"scan:create", "template:edit", "grading:review"}, Enabled: true},
+			{Key: "guardian", Name: "家长", Description: "查看孩子学情和购买增值服务", Permissions: []string{"student:read", "wrong-question:read"}, Enabled: true},
+		},
+		VIP: []SystemVIPConfig{
+			{Level: "free", Name: "免费版", TokenQuota: 50000, StorageQuotaGB: 1, Enabled: true},
+			{Level: "standard", Name: "标准版", TokenQuota: 500000, StorageQuotaGB: 20, Enabled: true},
+			{Level: "premium", Name: "高级版", TokenQuota: 2000000, StorageQuotaGB: 100, Enabled: true},
+		},
+	}
+}
+
+func (s *Store) aiProviderByName(ctx context.Context, name string) (AIProviderSetting, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, display_name, base_url, model, COALESCE(api_key, ''), timeout_seconds, COALESCE(callback_secret, ''), active, updated_at
+		FROM ai_provider_settings
+		WHERE name = ?
+		LIMIT 1`, name)
+	return scanAIProviderSetting(row)
+}
+
+type aiProviderScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanAIProviderSetting(row aiProviderScanner) (AIProviderSetting, error) {
+	var item AIProviderSetting
+	var updatedAt time.Time
+	if err := row.Scan(&item.ID, &item.Name, &item.DisplayName, &item.BaseURL, &item.Model, &item.APIKey, &item.TimeoutSeconds, &item.CallbackSecret, &item.Active, &updatedAt); err != nil {
+		return AIProviderSetting{}, err
+	}
+	item.APIKeyProvided = strings.TrimSpace(item.APIKey) != ""
+	item.CallbackSecretProvided = strings.TrimSpace(item.CallbackSecret) != ""
+	item.Configured = item.BaseURL != "" && item.Model != "" && item.APIKeyProvided
+	item.UpdatedAt = updatedAt.Format(time.RFC3339)
+	return item, nil
+}
+
 func (s *Store) Template(ctx context.Context, templateID string) (PaperTemplate, error) {
 	var item PaperTemplate
 	err := s.db.QueryRowContext(ctx, `
@@ -1593,6 +1985,15 @@ func (s *Store) CopyTemplate(ctx context.Context, templateID string) (PaperTempl
 func (s *Store) UpdateTemplateStatus(ctx context.Context, templateID string, status string) (PaperTemplate, error) {
 	if !validTemplateStatus(status) {
 		return PaperTemplate{}, fmt.Errorf("invalid template status: %s", status)
+	}
+	if status == "published" {
+		validation, err := s.ValidateTemplateByID(ctx, templateID)
+		if err != nil {
+			return PaperTemplate{}, err
+		}
+		if !validation.Valid {
+			return PaperTemplate{}, errTemplateValidationFailed
+		}
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE paper_templates
@@ -2084,6 +2485,26 @@ func (s *Store) GenerateExamScores(ctx context.Context, className string) (Score
 		return ScoreGenerationResponse{}, err
 	}
 	defer tx.Rollback()
+	var pendingObjective int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM objective_review_exceptions ex
+		JOIN submissions sub ON sub.id = ex.submission_id
+		JOIN students ON students.id = sub.student_id
+		JOIN classes ON classes.id = students.class_id
+		WHERE COALESCE(sub.class_name, classes.name) = ? AND ex.status = 'pending'`, className).Scan(&pendingObjective); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	var pendingSubjective int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM subjective_reviews
+		WHERE class_name = ? AND status IN ('pending', 'second_review', 'arbitration')`, className).Scan(&pendingSubjective); err != nil {
+		return ScoreGenerationResponse{}, err
+	}
+	if pendingObjective > 0 || pendingSubjective > 0 {
+		return ScoreGenerationResponse{Status: "blocked", ClassName: className, Blocked: true, Reason: "pending objective or subjective reviews must be resolved before score generation"}, errPendingReviewBlocksScores
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO question_scores (submission_id, question_id, question_no, score, max_score, source, status)
 		SELECT og.submission_id, og.question_id, qt.question_no, og.score, og.max_score, 'omr', 'final'

@@ -167,7 +167,7 @@ func templateAISuggestionFixture(template PaperTemplate, req TemplateAISuggestio
 		TotalScore:         total,
 		SuggestedQuestions: questions,
 		ReviewRequired:     true,
-		Source:             "worker-mock",
+		Source:             "local-fallback",
 	}
 }
 

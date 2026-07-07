@@ -89,6 +89,8 @@ type TemplateAISuggestionResponse = {
   suggestedQuestions: QuestionTemplate[];
   reviewRequired: boolean;
   source: string;
+  provider?: string;
+  providerError?: string;
 };
 
 type ScanTaskPreviewResponse = {
@@ -207,6 +209,99 @@ type PortalScoreStats = {
 };
 
 const portalSubjectOrder = ["语文", "数学", "英语"];
+
+type DevAuthRole = "teacher" | "student" | "guardian";
+
+type AuthUser = {
+  userId: string;
+  schoolId?: string;
+  roleNames: string[];
+  studentId?: string;
+  guardianId?: string;
+  teacherId?: string;
+};
+
+type AuthSession = {
+  status: string;
+  user: AuthUser;
+  authHeaders: Record<string, string>;
+};
+
+const demoAccounts = [
+  { role: "教务管理员", account: "user_admin_001", password: "Admin@123456" },
+  { role: "任课教师", account: "user_teacher_001", password: "Teacher@123456" },
+  { role: "学生", account: "user_stu_001", password: "Student@123456" },
+  { role: "家长", account: "user_guardian_001", password: "Guardian@123456" }
+];
+
+let currentAuthHeaders: Record<string, string> = {};
+
+function authHeaderValue(key: string, value: string) {
+  if (/^[\u0000-\u00ff]*$/.test(value)) {
+    return value;
+  }
+  if (key.toLowerCase() === "x-role") {
+    return encodeURIComponent(value);
+  }
+  return "";
+}
+
+function setCurrentAuthHeaders(headers: Record<string, string>) {
+  currentAuthHeaders = Object.fromEntries(
+    Object.entries(headers)
+      .map(([key, value]) => [key, authHeaderValue(key, value)] as const)
+      .filter(([, value]) => value !== "")
+  );
+}
+
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}, _role?: DevAuthRole) {
+  const headers = new Headers(init.headers);
+  Object.entries(currentAuthHeaders).forEach(([key, value]) => {
+    const safeValue = authHeaderValue(key, value);
+    if (safeValue) {
+      headers.set(key, safeValue);
+    }
+  });
+  return fetch(input, {
+    ...init,
+    headers
+  });
+}
+
+const apiErrorTranslations: Record<string, string> = {
+  "answer sheet scan must bind a template": "答题卡扫描必须绑定已发布答题卡",
+  "database unavailable": "数据库暂不可用，无法创建扫描任务",
+  "files are required": "请先选择扫描文件",
+  "pages must be greater than 0": "页数必须大于 0",
+  "scan task must bind a published template": "扫描任务必须绑定已发布答题卡",
+  "teacher role is required": "当前账号没有教师导入权限",
+  "template not found": "绑定的答题卡不存在",
+  "title and className are required": "请填写名称和班级",
+  unauthorized: "请先登录教师账号"
+};
+
+function localizeApiError(message: string) {
+  return apiErrorTranslations[message] ?? message;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+async function readApiError(response: Response, fallback: string) {
+  try {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json() as { error?: string | { message?: string; code?: string }; message?: string; detail?: string };
+      const error = typeof data.error === "string" ? data.error : data.error?.message;
+      return localizeApiError(error ?? data.message ?? data.detail ?? fallback);
+    }
+    const text = await response.text();
+    return text.trim() ? localizeApiError(text.trim()) : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 function makePortalWrongQuestion(subject: string, overrides: Partial<WrongQuestion>): WrongQuestion {
   return {
@@ -435,12 +530,139 @@ type AITaskResponse = {
 };
 
 type AIProviderPublicConfig = {
+  id?: string;
   name?: string;
+  displayName?: string;
   baseUrl?: string;
+  model?: string;
   timeoutSeconds?: number;
   apiKeyProvided?: boolean;
   callbackSecretProvided?: boolean;
+  active?: boolean;
   configured?: boolean;
+  updatedAt?: string;
+};
+
+type AIProviderSettingsResponse = {
+  current: AIProviderPublicConfig;
+  channels: AIProviderPublicConfig[];
+};
+
+type AIProviderForm = {
+  vendorName: string;
+  name: string;
+  customName: string;
+  displayName: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  timeoutSeconds: number;
+  callbackSecret: string;
+  keepExistingKey: boolean;
+};
+
+const defaultAIProviderChannels: AIProviderPublicConfig[] = [
+  { name: "openai", displayName: "OpenAI / ChatGPT", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", timeoutSeconds: 30 },
+  { name: "deepseek", displayName: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", timeoutSeconds: 30 },
+  { name: "qwen", displayName: "通义千问 Qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", timeoutSeconds: 30 },
+  { name: "anthropic", displayName: "Anthropic Claude", baseUrl: "https://api.anthropic.com/v1", model: "claude-3-5-sonnet-latest", timeoutSeconds: 45 },
+  { name: "generic-http", displayName: "通用 HTTP 适配", baseUrl: "", model: "", timeoutSeconds: 30 }
+];
+
+const defaultAIProviderNames = new Set(defaultAIProviderChannels.map((channel) => channel.name));
+
+function aiProviderVendorName(channel: AIProviderPublicConfig) {
+  const name = channel.name ?? "";
+  const matchedByName = defaultAIProviderChannels.find((item) => name === item.name || name.startsWith(`${item.name}-`));
+  if (matchedByName?.name) {
+    return matchedByName.name;
+  }
+  const matchedByBaseURL = defaultAIProviderChannels.find((item) => item.baseUrl && item.baseUrl === channel.baseUrl);
+  return matchedByBaseURL?.name || name || "generic-http";
+}
+
+function slugAIModelName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function aiModelConfigName(vendorName: string, customName: string, currentName: string) {
+  const vendor = vendorName || "generic-http";
+  const defaultChannel = defaultAIProviderChannels.find((channel) => channel.name === vendor);
+  const trimmedCustomName = customName.trim();
+  if (currentName && !defaultAIProviderNames.has(currentName)) {
+    return currentName;
+  }
+  if (!trimmedCustomName || trimmedCustomName === defaultChannel?.displayName) {
+    return vendor;
+  }
+  const suffix = slugAIModelName(trimmedCustomName) || String(Date.now());
+  return `${vendor}-${suffix}`;
+}
+
+const defaultSystemConfig: SystemConfig = {
+  storage: {
+    driver: "obs",
+    endpoint: "",
+    bucket: "",
+    region: "",
+    publicBaseUrl: "",
+    maxUploadMb: 25,
+    accessKey: "",
+    secretKey: "",
+    keepExistingSecret: true
+  },
+  roles: [
+    { key: "admin", name: "教务管理员", description: "系统配置、组织、试卷和答题卡管理", permissions: ["system:write", "paper:delete", "template:delete"], enabled: true },
+    { key: "teacher", name: "任课教师", description: "导入试卷、生成答题卡、阅卷和学情", permissions: ["scan:create", "template:edit", "grading:review"], enabled: true },
+    { key: "guardian", name: "家长", description: "查看孩子学情和购买增值服务", permissions: ["student:read", "wrong-question:read"], enabled: true }
+  ],
+  vip: [
+    { level: "free", name: "免费版", tokenQuota: 50000, storageQuotaGb: 1, enabled: true },
+    { level: "standard", name: "标准版", tokenQuota: 500000, storageQuotaGb: 20, enabled: true },
+    { level: "premium", name: "高级版", tokenQuota: 2000000, storageQuotaGb: 100, enabled: true }
+  ]
+};
+
+type PaperManagementItem = {
+  id: string;
+  title: string;
+  className: string;
+  pages: number;
+  status: string;
+  progress: number;
+  sourceFileUrl?: string;
+  sourceFileKey?: string;
+  fileName?: string;
+  importedAt?: string;
+  template?: PaperTemplate;
+  templateId?: string;
+  templateVersion?: number;
+};
+
+type PaperManagementResponse = {
+  items: PaperManagementItem[];
+};
+
+type SystemConfig = {
+  storage: {
+    driver: string;
+    endpoint: string;
+    bucket: string;
+    region: string;
+    publicBaseUrl: string;
+    maxUploadMb: number;
+    accessKeyProvided?: boolean;
+    secretKeyProvided?: boolean;
+    accessKey?: string;
+    secretKey?: string;
+    keepExistingSecret?: boolean;
+  };
+  roles: Array<{ key: string; name: string; description: string; permissions: string[]; enabled: boolean }>;
+  vip: Array<{ level: string; name: string; tokenQuota: number; storageQuotaGb: number; enabled: boolean }>;
 };
 
 type OrganizationGraph = {
@@ -668,10 +890,11 @@ type ScoreGenerationResponse = {
   generated: number;
 };
 
-type ActiveView = "workspace" | "organization" | "scan" | "templates" | "questionBank" | "paperFlow" | "aiTasks" | "grading" | "mistakes" | "analytics";
+type ActiveView = "workspace" | "organization" | "systemConfig" | "scan" | "papers" | "templates" | "templateManage" | "questionBank" | "paperFlow" | "aiTasks" | "aiProviders" | "grading" | "mistakes" | "analytics";
 type Overlay = "filter" | "notifications" | null;
-type TemplateTool = "objective" | "subjective" | "choice" | "judge";
+type TemplateTool = "objective" | "subjective" | "choice" | "judge" | "fill_blank" | "calculation" | "essay";
 type TemplateStatus = "draft" | "published" | "disabled";
+type AnswerSheetMode = "ai" | "manual";
 type RequestStatus = "loading" | "processing" | "success" | "error" | "empty";
 type UserRole = "teacher" | "researcher" | "admin" | "student" | "guardian";
 type Permission =
@@ -682,7 +905,8 @@ type Permission =
   | "grading:review"
   | "grading:decide"
   | "mistake:generate"
-  | "guardian:remind";
+  | "guardian:remind"
+  | "system:config";
 
 type Option = {
   label: string;
@@ -717,6 +941,25 @@ type CanvasSize = {
 
 type TemplateSourceMode = "scan" | "library";
 
+type AnswerSheetBasics = {
+  subject: string;
+  gradeName: string;
+  className: string;
+  targetScore: number;
+  durationMinutes: number;
+  nameField: string;
+  examNoField: string;
+};
+
+type ManualQuestionGroup = {
+  id: string;
+  title: string;
+  type: TemplateTool;
+  count: number;
+  score: number;
+  startNo: number;
+};
+
 type TemplatePaperSource = {
   id: string;
   title: string;
@@ -725,6 +968,9 @@ type TemplatePaperSource = {
   size: CanvasSize;
   importedAt: string;
   source: "现场扫描" | "库存";
+  fileName?: string;
+  fileKey?: string;
+  fileUrl?: string;
 };
 
 type TemplateDraft = {
@@ -735,6 +981,9 @@ type TemplateDraft = {
   size: CanvasSize;
   zoom: number;
   regions: CanvasRegion[];
+  mode?: AnswerSheetMode;
+  basics?: AnswerSheetBasics;
+  groups?: ManualQuestionGroup[];
 };
 
 type DragState = {
@@ -747,16 +996,36 @@ type DragState = {
 
 const templateTools: Record<TemplateTool, { label: string; color: string }> = {
   objective: { label: "客观题", color: "#155b92" },
-  subjective: { label: "主观题", color: "#0d7c66" },
+  subjective: { label: "问答题", color: "#0d7c66" },
   choice: { label: "选择题", color: "#7c3aed" },
-  judge: { label: "判断题", color: "#b97809" }
+  judge: { label: "判断题", color: "#b97809" },
+  fill_blank: { label: "填空题", color: "#2563eb" },
+  calculation: { label: "计算题", color: "#0f766e" },
+  essay: { label: "作文", color: "#9333ea" }
 };
 
-const objectiveAnswerOptions: Record<Exclude<TemplateTool, "subjective">, string[]> = {
+const objectiveAnswerOptions: Partial<Record<TemplateTool, string[]>> = {
   choice: ["A", "B", "C", "D"],
   judge: ["正确", "错误"],
   objective: ["A", "B", "C", "D", "正确", "错误"]
 };
+
+const defaultAnswerSheetBasics: AnswerSheetBasics = {
+  subject: "数学",
+  gradeName: "六年级",
+  className: "六年级 3 班",
+  targetScore: 100,
+  durationMinutes: 90,
+  nameField: "姓名",
+  examNoField: "考号"
+};
+
+const defaultManualGroups: ManualQuestionGroup[] = [
+  { id: "group_choice", title: "一", type: "choice", count: 10, score: 2, startNo: 1 },
+  { id: "group_fill", title: "二", type: "fill_blank", count: 6, score: 3, startNo: 11 },
+  { id: "group_calculation", title: "三", type: "calculation", count: 4, score: 8, startNo: 17 },
+  { id: "group_subjective", title: "四", type: "subjective", count: 3, score: 10, startNo: 21 }
+];
 
 const templateStatusLabels: Record<TemplateStatus, string> = {
   draft: "草稿",
@@ -788,20 +1057,20 @@ const roleConfig: Record<UserRole, { label: string; description: string; views: 
   teacher: {
     label: "教师",
     description: "导入、生成答题卡、阅卷和学情",
-    views: ["workspace", "scan", "templates", "questionBank", "paperFlow", "aiTasks", "grading", "mistakes", "analytics"],
+    views: ["workspace", "scan", "papers", "templates", "templateManage", "questionBank", "paperFlow", "aiTasks", "aiProviders", "grading", "mistakes", "analytics"],
     permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
   },
   researcher: {
     label: "教研",
     description: "答题卡、错题和学情分析",
-    views: ["workspace", "templates", "questionBank", "paperFlow", "aiTasks", "mistakes", "analytics"],
+    views: ["workspace", "papers", "templates", "templateManage", "questionBank", "paperFlow", "aiTasks", "aiProviders", "mistakes", "analytics"],
     permissions: ["template:edit", "template:ai", "mistake:generate"]
   },
   admin: {
     label: "管理员",
     description: "全部入口和维护操作",
-    views: ["workspace", "organization", "scan", "templates", "questionBank", "paperFlow", "aiTasks", "grading", "mistakes", "analytics"],
-    permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind"]
+    views: ["workspace", "organization", "systemConfig", "scan", "papers", "templates", "templateManage", "questionBank", "paperFlow", "aiTasks", "aiProviders", "grading", "mistakes", "analytics"],
+    permissions: ["scan:create", "template:edit", "template:delete", "template:ai", "grading:review", "grading:decide", "mistake:generate", "guardian:remind", "system:config"]
   },
   student: {
     label: "学生",
@@ -817,50 +1086,57 @@ const roleConfig: Record<UserRole, { label: string; description: string; views: 
   }
 };
 
+function roleFromAuthUser(user: AuthUser): UserRole {
+  if (user.roleNames.includes("教务管理员")) {
+    return "admin";
+  }
+  if (user.teacherId || user.roleNames.includes("任课教师")) {
+    return "teacher";
+  }
+  if (user.guardianId || user.roleNames.includes("家长")) {
+    return "guardian";
+  }
+  if (user.studentId) {
+    return "student";
+  }
+  return "teacher";
+}
+
+function allowedRolesForAuthUser(user: AuthUser): UserRole[] {
+  const roles: UserRole[] = [];
+  if (user.roleNames.includes("教务管理员")) {
+    roles.push("admin", "teacher", "researcher");
+  }
+  if (user.teacherId || user.roleNames.includes("任课教师")) {
+    roles.push("teacher", "researcher");
+  }
+  if (user.studentId) {
+    roles.push("student");
+  }
+  if (user.guardianId || user.roleNames.includes("家长")) {
+    roles.push("guardian");
+  }
+  return Array.from(new Set(roles.length > 0 ? roles : ["teacher"]));
+}
+
 const navItems = [
-  { view: "workspace", label: "工作台", icon: LayoutDashboard },
-  { view: "organization", label: "组织与用户", icon: UsersRound },
-  { view: "scan", label: "扫描导入", icon: ScanLine },
-  { view: "templates", label: "生成答题卡", icon: FileStack },
-  { view: "questionBank", label: "试题库", icon: BookOpenCheck },
-  { view: "paperFlow", label: "组卷阅卷", icon: ClipboardCheck },
-  { view: "aiTasks", label: "AI任务", icon: Sparkles },
-  { view: "grading", label: "阅卷中心", icon: ClipboardCheck },
-  { view: "mistakes", label: "错题集", icon: BookOpenCheck },
-  { view: "analytics", label: "学情分析", icon: UsersRound }
-] satisfies Array<{ view: ActiveView; label: string; icon: typeof LayoutDashboard }>;
+  { view: "workspace", label: "工作台", icon: LayoutDashboard, group: "常用" },
+  { view: "scan", label: "扫描导入", icon: ScanLine, group: "试卷与答题卡" },
+  { view: "papers", label: "试卷管理", icon: FileStack, group: "试卷与答题卡" },
+  { view: "templates", label: "生成答题卡", icon: FileStack, group: "试卷与答题卡" },
+  { view: "templateManage", label: "答题卡管理", icon: FileStack, group: "试卷与答题卡" },
+  { view: "questionBank", label: "试题库", icon: BookOpenCheck, group: "教学资源" },
+  { view: "paperFlow", label: "组卷阅卷", icon: ClipboardCheck, group: "教学资源" },
+  { view: "grading", label: "阅卷中心", icon: ClipboardCheck, group: "阅卷与学情" },
+  { view: "mistakes", label: "错题集", icon: BookOpenCheck, group: "阅卷与学情" },
+  { view: "analytics", label: "学情分析", icon: UsersRound, group: "阅卷与学情" },
+  { view: "aiTasks", label: "AI任务", icon: Sparkles, group: "系统管理" },
+  { view: "aiProviders", label: "AI模型配置", icon: Sparkles, group: "系统管理" },
+  { view: "systemConfig", label: "系统配置", icon: ShieldCheck, group: "系统管理" },
+  { view: "organization", label: "组织与用户", icon: UsersRound, group: "系统管理" }
+] satisfies Array<{ view: ActiveView; label: string; icon: typeof LayoutDashboard; group: string }>;
 
 const pageSize = 4;
-
-const fallbackPaperSources: TemplatePaperSource[] = [
-  {
-    id: "paper_stock_001",
-    title: "六年级数学期中卷空白卷",
-    className: "六年级 3 班",
-    pages: 2,
-    size: canvasPresets[1],
-    importedAt: "2026-06-18 09:20",
-    source: "库存"
-  },
-  {
-    id: "paper_stock_002",
-    title: "分数应用题专项空白卷",
-    className: "六年级 1 班",
-    pages: 1,
-    size: canvasPresets[0],
-    importedAt: "2026-06-17 15:42",
-    source: "库存"
-  },
-  {
-    id: "paper_stock_003",
-    title: "几何面积横版练习",
-    className: "五年级 2 班",
-    pages: 1,
-    size: canvasPresets[2],
-    importedAt: "2026-06-16 11:08",
-    source: "库存"
-  }
-];
 
 const templateDraftStorageKey = "club.templateDrafts";
 const templateLibraryStorageKey = "club.templateLibrary";
@@ -1059,6 +1335,9 @@ const errorTypeLabels: Record<string, string> = {
 };
 
 function toolFromQuestionType(type: string): TemplateTool {
+  if (type === "fill_blank" || type === "calculation" || type === "essay") {
+    return type;
+  }
   if (type === "subjective") {
     return "subjective";
   }
@@ -1076,6 +1355,47 @@ function questionTypeFromTool(type: TemplateTool): string {
     return "single_choice";
   }
   return type;
+}
+
+function gradeFromClassName(className: string) {
+  const match = className.trim().match(/^[^\s]+/);
+  return match?.[0] || "六年级";
+}
+
+function normalizeAnswerSheetBasics(basics?: Partial<AnswerSheetBasics>): AnswerSheetBasics {
+  const className = basics?.className?.trim() || defaultAnswerSheetBasics.className;
+  return {
+    ...defaultAnswerSheetBasics,
+    ...basics,
+    gradeName: basics?.gradeName?.trim() || gradeFromClassName(className),
+    className
+  };
+}
+
+function manualQuestionHeight(type: TemplateTool, score: number) {
+  if (type === "choice" || type === "judge" || type === "objective") {
+    return 38;
+  }
+  if (type === "fill_blank") {
+    return 50;
+  }
+  if (type === "calculation") {
+    return Math.max(92, 62 + score * 5);
+  }
+  if (type === "essay") {
+    return Math.max(220, 160 + score * 4);
+  }
+  return Math.max(82, 56 + score * 5);
+}
+
+function regionsOverlap(left: CanvasRegion, right: CanvasRegion) {
+  if (left.region.page !== right.region.page) {
+    return false;
+  }
+  return left.region.x < right.region.x + right.region.width
+    && left.region.x + left.region.width > right.region.x
+    && left.region.y < right.region.y + right.region.height
+    && left.region.y + left.region.height > right.region.y;
 }
 
 function normalizeTemplateStatus(status?: string): TemplateStatus {
@@ -1323,6 +1643,95 @@ function RequestStateView({
   );
 }
 
+function LoginView({
+  onLogin
+}: {
+  onLogin: (session: AuthSession) => void;
+}) {
+  const [account, setAccount] = useState("user_teacher_001");
+  const [password, setPassword] = useState("Teacher@123456");
+  const [status, setStatus] = useState<RequestState>({ status: "empty", message: "请输入账号密码" });
+
+  async function submitLogin(event: { preventDefault: () => void }) {
+    event?.preventDefault();
+    if (!account.trim() || !password) {
+      setStatus({ status: "error", message: "请输入账号和密码" });
+      return;
+    }
+    setStatus({ status: "processing", message: "正在验证账号密码" });
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account: account.trim(), password })
+      });
+      if (!response.ok) {
+        throw new Error("login failed");
+      }
+      const session = await response.json() as AuthSession;
+      if (!session.authHeaders?.["X-User-ID"]) {
+        throw new Error("missing auth headers");
+      }
+      setStatus({ status: "success", message: "登录成功" });
+      onLogin(session);
+    } catch {
+      setStatus({ status: "error", message: "账号或密码不正确", detail: "请使用 README 中记录的本地演示账号。" });
+    }
+  }
+
+  function fillDemo(accountValue: string, passwordValue: string) {
+    setAccount(accountValue);
+    setPassword(passwordValue);
+    setStatus({ status: "empty", message: "已填入演示账号" });
+  }
+
+  return (
+    <main className="login-shell">
+      <section className="login-panel">
+        <div className="login-brand">
+          <div className="brand-mark">C</div>
+          <div>
+            <strong>Club</strong>
+            <span>阅卷与学情平台</span>
+          </div>
+        </div>
+        <div className="login-copy">
+          <p className="eyebrow">Account Required</p>
+          <h1>登录后进入对应工作台</h1>
+          <p>系统会调用 <code>/api/auth/login</code> 验证账号密码，并使用返回的请求头访问后续 API。</p>
+        </div>
+        <form className="login-form" onSubmit={(event: { preventDefault: () => void }) => void submitLogin(event)}>
+          <label>
+            账号
+            <input autoComplete="username" onChange={(event: { target: { value: string } }) => setAccount(event.target.value)} value={account} />
+          </label>
+          <label>
+            密码
+            <input autoComplete="current-password" onChange={(event: { target: { value: string } }) => setPassword(event.target.value)} type="password" value={password} />
+          </label>
+          <RequestStateView state={status} compact />
+          <button className="primary-button" disabled={status.status === "processing"} type="submit">
+            {status.status === "processing" ? <Loader2 size={18} /> : <ShieldCheck size={18} />}登录
+          </button>
+        </form>
+      </section>
+      <aside className="login-demo">
+        <p className="eyebrow">Demo Accounts</p>
+        <h2>本地演示账号</h2>
+        <div className="login-account-list">
+          {demoAccounts.map((item) => (
+            <button key={item.account} onClick={() => fillDemo(item.account, item.password)} type="button">
+              <strong>{item.role}</strong>
+              <span>{item.account}</span>
+              <small>{item.password}</small>
+            </button>
+          ))}
+        </div>
+      </aside>
+    </main>
+  );
+}
+
 function TableToolbar({
   searchValue,
   onSearchChange,
@@ -1433,6 +1842,29 @@ function loadStoredTemplateLibrary(): PaperTemplate[] {
   }
 }
 
+function loadStoredPaperSources(): TemplatePaperSource[] {
+  return [];
+}
+
+function paperSourceFromManagedPaper(paper: PaperManagementItem): TemplatePaperSource {
+  return {
+    id: paper.id,
+    title: paper.title,
+    className: paper.className,
+    pages: paper.pages,
+    size: canvasPresets[1],
+    importedAt: paper.importedAt || "已导入",
+    source: "库存",
+    fileName: paper.fileName,
+    fileKey: paper.sourceFileKey,
+    fileUrl: paper.sourceFileUrl
+  };
+}
+
+function paperSourceHasFile(source: TemplatePaperSource) {
+  return Boolean(source.fileUrl || source.fileKey);
+}
+
 function GuardianChildConfig({
   children,
   selectedStudentId,
@@ -1520,9 +1952,9 @@ function PortalView({
     try {
       const targetStudentId = role === "guardian" ? (studentId || selectedStudentId || "") : "";
       const path = role === "guardian"
-        ? `/api/portal/guardian?guardianId=guardian_001${targetStudentId ? `&studentId=${targetStudentId}` : ""}`
-        : "/api/portal/student?studentId=stu_001";
-      const response = await fetch(path);
+        ? `/api/portal/guardian${targetStudentId ? `?studentId=${targetStudentId}` : ""}`
+        : "/api/portal/student";
+      const response = await apiFetch(path, {}, role);
       if (!response.ok) throw new Error("portal unavailable");
       const payload = await response.json() as PortalData | { children: GuardianChildLink[]; selected: PortalData };
       if ("selected" in payload) {
@@ -1562,7 +1994,7 @@ function PortalView({
 
   async function reserve(capability: string) {
     try {
-      await fetch(`/api/ai/capabilities/${capability}/requests`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ studentId: data?.studentId, channel: role }) });
+      await apiFetch(`/api/ai/capabilities/${capability}/requests`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ studentId: data?.studentId, channel: role }) }, role);
       onNotice("已登记体验意向，能力接入后会通知你");
     } catch {
       onNotice("体验意向已在本地记录");
@@ -1697,7 +2129,7 @@ function OrganizationView({ onNotice }: { onNotice: (value: string) => void }) {
   const [kind, setKind] = useState("schools");
   const [entityForm, setEntityForm] = useState({ name: "", schoolId: "", gradeId: "", classId: "", subjectId: "", teacherId: "", studentNo: "", mobile: "", stage: "primary" });
   const [inviteForm, setInviteForm] = useState({ teacherId: "", studentId: "", mobileHint: "" });
-  const [certForm, setCertForm] = useState({ token: "", guardianName: "", mobile: "", relationship: "parent" });
+  const [certForm, setCertForm] = useState({ token: "", guardianName: "", mobile: "", relationship: "parent", evidenceObjectKey: "demo/guardian-certification/evidence.jpg" });
   const schools = graph?.schools ?? [];
   const grades = graph?.grades ?? [];
   const classes = graph?.classes ?? [];
@@ -1744,7 +2176,7 @@ function OrganizationView({ onNotice }: { onNotice: (value: string) => void }) {
     if (!certForm.token || !certForm.guardianName) { onNotice("请填写邀请 token 和家长姓名"); return; }
     const response = await fetch("/api/guardian/certifications", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(certForm) });
     if (!response.ok) { onNotice("认证申请提交失败，请检查邀请是否过期"); return; }
-    setCertForm({ token: "", guardianName: "", mobile: "", relationship: "parent" });
+    setCertForm({ token: "", guardianName: "", mobile: "", relationship: "parent", evidenceObjectKey: "demo/guardian-certification/evidence.jpg" });
     onNotice("认证申请已提交，等待管理员审核"); void load();
   }
   async function decideCertification(id: string, status: "approved" | "rejected") {
@@ -1795,6 +2227,7 @@ function OrganizationView({ onNotice }: { onNotice: (value: string) => void }) {
             <label>邀请 token<input value={certForm.token} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, token: event.target.value }))} placeholder="教师邀请生成后自动填入" /></label>
             <label>家长姓名<input value={certForm.guardianName} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, guardianName: event.target.value }))} placeholder="家长真实姓名" /></label>
             <label>家长手机号<input value={certForm.mobile} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, mobile: event.target.value }))} placeholder="用于后续登录" /></label>
+            <label>认证材料 Key<input value={certForm.evidenceObjectKey} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, evidenceObjectKey: event.target.value }))} placeholder="材料文件对象 Key" /></label>
             <label>关系<select value={certForm.relationship} onChange={(event: { target: { value: string } }) => setCertForm((current) => ({ ...current, relationship: event.target.value }))}><option value="parent">父母</option><option value="guardian">监护人</option><option value="relative">亲属</option></select></label>
           </div>
           <button className="primary-button" onClick={() => void submitCertification()} type="button">提交家长认证申请</button>
@@ -2122,7 +2555,7 @@ function PaperFlowView({ onNotice }: { onNotice: (value: string) => void }) {
   );
 }
 
-function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
+function AITasksView({ onNotice, onOpenProviders }: { onNotice: (value: string) => void; onOpenProviders?: () => void }) {
   const [tasks, setTasks] = useState<AITaskRecord[]>([]);
   const [provider, setProvider] = useState<AIProviderPublicConfig>({});
   const [filters, setFilters] = useState({ status: "", taskType: "" });
@@ -2135,7 +2568,7 @@ function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
     if (filters.taskType) params.set("taskType", filters.taskType);
     try {
       const [taskResponse, healthResponse] = await Promise.all([
-        fetch(`/api/ai/tasks?${params.toString()}`),
+        apiFetch(`/api/ai/tasks?${params.toString()}`),
         fetch("/health")
       ]);
       if (!taskResponse.ok) throw new Error("ai task api unavailable");
@@ -2156,7 +2589,7 @@ function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
   useEffect(() => { void load(); }, []);
 
   async function dispatchTask(taskID: string) {
-    const response = await fetch(`/api/ai/tasks/${encodeURIComponent(taskID)}/dispatch`, { method: "POST" });
+    const response = await apiFetch(`/api/ai/tasks/${encodeURIComponent(taskID)}/dispatch`, { method: "POST" });
     const task = await response.json() as AITaskRecord;
     if (!response.ok && response.status !== 409) {
       onNotice(task.message || task.errorMessage || "AI 任务派发失败");
@@ -2179,7 +2612,10 @@ function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
             <p className="eyebrow">Third-party AI Provider</p>
             <h2>AI 任务调度</h2>
           </div>
-          <button className="ghost-button" disabled={loading} onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button>
+          <div className="top-actions">
+            <button className="ghost-button" disabled={loading} onClick={() => void load()} type="button"><RefreshCw size={16} />刷新</button>
+            {onOpenProviders ? <button className="secondary-button" onClick={onOpenProviders} type="button"><Sparkles size={16} />模型配置</button> : null}
+          </div>
         </div>
         <div className="ai-provider-card">
           <div>
@@ -2259,10 +2695,34 @@ function AITasksView({ onNotice }: { onNotice: (value: string) => void }) {
 }
 
 function App() {
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [dashboard, setDashboard] = useState<DashboardData>(fallbackDashboard);
   const [subjective, setSubjective] = useState<SubjectiveData | null>(fallbackSubjective);
   const [templates, setTemplates] = useState<PaperTemplate[]>(loadStoredTemplateLibrary);
   const [analytics, setAnalytics] = useState<ClassroomAnalytics>(fallbackAnalytics);
+  const [managedPapers, setManagedPapers] = useState<PaperManagementItem[]>([]);
+  const [paperManagementState, setPaperManagementState] = useState<RequestState>({ status: "loading", message: "正在加载试卷库" });
+  const [paperSearch, setPaperSearch] = useState("");
+  const [paperStatusFilter, setPaperStatusFilter] = useState("all");
+  const [systemConfig, setSystemConfig] = useState<SystemConfig>(defaultSystemConfig);
+  const [systemConfigState, setSystemConfigState] = useState<RequestState>({ status: "loading", message: "正在加载系统配置" });
+  const [aiProviderConfig, setAiProviderConfig] = useState<AIProviderPublicConfig>(defaultAIProviderChannels[0] ?? {});
+  const [aiProviderChannels, setAiProviderChannels] = useState<AIProviderPublicConfig[]>(defaultAIProviderChannels);
+  const [aiProviderState, setAiProviderState] = useState<RequestState>({ status: "loading", message: "正在加载 AI 模型配置" });
+  const [aiProviderSearch, setAiProviderSearch] = useState("");
+  const [aiProviderForm, setAiProviderForm] = useState<AIProviderForm>({
+    vendorName: "openai",
+    name: "openai",
+    customName: "OpenAI / ChatGPT",
+    displayName: "OpenAI / ChatGPT",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    apiKey: "",
+    timeoutSeconds: 30,
+    callbackSecret: "",
+    keepExistingKey: true
+  });
+  const [selectedAIProviderName, setSelectedAIProviderName] = useState(defaultAIProviderChannels[0]?.name ?? "openai");
   const [dashboardState, setDashboardState] = useState<RequestState>({ status: "loading", message: "正在加载工作台数据" });
   const [subjectiveState, setSubjectiveState] = useState<RequestState>({ status: "loading", message: "正在连接阅卷队列" });
   const [templatesState, setTemplatesState] = useState<RequestState>({ status: "loading", message: "正在加载答题卡库" });
@@ -2272,7 +2732,7 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>("workspace");
   const [currentRole, setCurrentRole] = useState<UserRole>("teacher");
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [notice, setNotice] = useState("已连接本地开发环境");
+  const [notice, setNotice] = useState("请先登录");
   const [scanTitle, setScanTitle] = useState("六年级数学期中卷");
   const [scanType, setScanType] = useState<ScanType>("paper");
   const [scanClassName, setScanClassName] = useState("六年级 3 班");
@@ -2283,8 +2743,12 @@ function App() {
   const [scanUploadedFiles, setScanUploadedFiles] = useState<ScanUploadFile[]>([]);
   const [scanFileError, setScanFileError] = useState("");
   const [templateSourceMode, setTemplateSourceMode] = useState<TemplateSourceMode>("library");
-  const [paperSources, setPaperSources] = useState<TemplatePaperSource[]>(fallbackPaperSources);
+  const [answerSheetMode, setAnswerSheetMode] = useState<AnswerSheetMode>("ai");
+  const [answerSheetBasics, setAnswerSheetBasics] = useState<AnswerSheetBasics>(defaultAnswerSheetBasics);
+  const [manualGroups, setManualGroups] = useState<ManualQuestionGroup[]>(defaultManualGroups);
+  const [paperSources, setPaperSources] = useState<TemplatePaperSource[]>(loadStoredPaperSources);
   const [selectedPaperSourceId, setSelectedPaperSourceId] = useState("");
+  const [lastImportedPaperSourceId, setLastImportedPaperSourceId] = useState("");
   const [canvasTitle, setCanvasTitle] = useState("未命名答题卡");
   const [canvasSize, setCanvasSize] = useState<CanvasSize>(canvasPresets[1]);
   const [canvasZoom, setCanvasZoom] = useState(1);
@@ -2347,12 +2811,32 @@ function App() {
   const [guardianChildren, setGuardianChildren] = useState<GuardianChildLink[]>([]);
   const [selectedGuardianStudentId, setSelectedGuardianStudentId] = useState("stu_001");
 
+  function applyLogin(session: AuthSession) {
+    setCurrentAuthHeaders(session.authHeaders);
+    const nextRole = roleFromAuthUser(session.user);
+    setAuthSession(session);
+    setCurrentRole(nextRole);
+    setActiveView(roleConfig[nextRole].views[0] ?? "workspace");
+    setNotice(`已登录：${session.user.userId}`);
+  }
+
+  function logout() {
+    setCurrentAuthHeaders({});
+    setAuthSession(null);
+    setCurrentRole("teacher");
+    setActiveView("workspace");
+    setNotice("请先登录");
+  }
+
   const publishedTemplates = useMemo(
     () => templates.filter((template) => normalizeTemplateStatus(template.status) === "published"),
     [templates]
   );
 
   useEffect(() => {
+    if (!authSession) {
+      return;
+    }
     loadDashboard();
     loadReviewQueue(true);
     loadSubjective();
@@ -2360,7 +2844,7 @@ function App() {
     loadAnalytics();
     loadWrongQuestions();
     loadLearningProfile();
-  }, []);
+  }, [authSession?.user.userId]);
 
   useEffect(() => {
     if (!publishedTemplates.some((template) => template.id === scanTemplateId)) {
@@ -2399,6 +2883,10 @@ function App() {
     () => paperSources.find((item) => item.id === selectedPaperSourceId),
     [paperSources, selectedPaperSourceId]
   );
+  const lastImportedPaperSource = useMemo(
+    () => paperSources.find((item) => item.id === lastImportedPaperSourceId),
+    [lastImportedPaperSourceId, paperSources]
+  );
 
   const activeRole = roleConfig[currentRole];
 
@@ -2406,12 +2894,56 @@ function App() {
     () => navItems.filter((item) => activeRole.views.includes(item.view)),
     [activeRole]
   );
+  const visibleNavGroups = useMemo(() => {
+    const groups: Array<{ label: string; items: typeof visibleNavItems }> = [];
+    visibleNavItems.forEach((item) => {
+      const group = groups.find((entry) => entry.label === item.group);
+      if (group) {
+        group.items.push(item);
+      } else {
+        groups.push({ label: item.group, items: [item] });
+      }
+    });
+    return groups;
+  }, [visibleNavItems]);
 
   const can = (permission: Permission) => activeRole.permissions.includes(permission);
   const isPortalRole = currentRole === "student" || currentRole === "guardian";
   const canManageAnalytics = can("grading:decide") || can("guardian:remind");
+  const filteredManagedPapers = useMemo(() => {
+    const search = paperSearch.trim().toLowerCase();
+    return managedPapers.filter((paper) => {
+      const statusMatch = paperStatusFilter === "all"
+        || (paperStatusFilter === "bound" && Boolean(paper.template))
+        || (paperStatusFilter === "pending" && !paper.template);
+      if (!statusMatch) {
+        return false;
+      }
+      if (!search) {
+        return true;
+      }
+      return `${paper.title} ${paper.className} ${paper.fileName ?? ""} ${paper.sourceFileUrl ?? ""} ${paper.sourceFileKey ?? ""}`.toLowerCase().includes(search);
+    });
+  }, [managedPapers, paperSearch, paperStatusFilter]);
+  const selectedAIProvider = aiProviderChannels.find((channel) => channel.name === selectedAIProviderName)
+    ?? defaultAIProviderChannels.find((channel) => channel.name === selectedAIProviderName);
+  const configuredAIProviders = useMemo(
+    () => aiProviderChannels.filter((channel) => Boolean(channel.id?.startsWith("aip_")) || Boolean(channel.configured && channel.name && !channel.id?.startsWith("channel_") && !channel.id?.startsWith("env_") && !defaultAIProviderNames.has(channel.name))),
+    [aiProviderChannels]
+  );
+  const filteredConfiguredAIProviders = useMemo(() => {
+    const search = aiProviderSearch.trim().toLowerCase();
+    if (!search) {
+      return configuredAIProviders;
+    }
+    return configuredAIProviders.filter((channel) => `${channel.displayName ?? ""} ${channel.name ?? ""} ${aiProviderVendorName(channel)} ${channel.model ?? ""} ${channel.baseUrl ?? ""}`.toLowerCase().includes(search));
+  }, [aiProviderSearch, configuredAIProviders]);
+  const canGenerateAnswerSheet = Boolean(selectedPaperSource && selectedAIProviderName && selectedAIProvider);
 
   useEffect(() => {
+    if (!authSession) {
+      return;
+    }
     if (!activeRole.permissions.includes("scan:create") || (activeView !== "workspace" && activeView !== "scan")) {
       return;
     }
@@ -2420,7 +2952,28 @@ function App() {
       void loadScanTasks(true);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [activeRole.permissions, activeView]);
+  }, [authSession, activeRole.permissions, activeView]);
+
+  useEffect(() => {
+    if (!authSession || (activeView !== "papers" && activeView !== "templates")) {
+      return;
+    }
+    void loadManagedPapers();
+  }, [authSession, activeView]);
+
+  useEffect(() => {
+    if (!authSession || (activeView !== "aiProviders" && activeView !== "templates")) {
+      return;
+    }
+    void loadAIProviders();
+  }, [authSession, activeView]);
+
+  useEffect(() => {
+    if (!authSession || activeView !== "systemConfig") {
+      return;
+    }
+    void loadSystemConfig();
+  }, [authSession, activeView]);
 
   const filteredScanQueue = useMemo(() => {
     const rows = dashboard.scanQueue
@@ -2527,7 +3080,7 @@ function App() {
         }
         return template.subject === templateFilter || template.grade === templateFilter;
       })
-      .filter((template) => includesSearch(`${template.name} ${template.grade} ${template.subject}`, templateSearch));
+      .filter((template) => includesSearch(`${template.name} ${template.grade} ${template.subject} ${template.sourceFileUrl ?? ""} ${sourceNameForTemplate(template)}`, templateSearch));
     return [...rows].sort((a, b) => {
       if (templateSort === "score_desc") {
         return b.totalScore - a.totalScore;
@@ -2537,9 +3090,70 @@ function App() {
       }
       return a.name.localeCompare(b.name, "zh-Hans-CN");
     });
-  }, [templates, templateSearch, templateFilter, templateSort]);
+  }, [templates, templateSearch, templateFilter, templateSort, paperSources]);
 
   const pagedTemplates = pageItems(filteredTemplates, templatePage);
+
+  const answerSheetScoreTotal = useMemo(
+    () => canvasRegions.reduce((sum, item) => sum + item.score, 0),
+    [canvasRegions]
+  );
+
+  const answerSheetValidationIssues = useMemo(() => {
+    const issues: string[] = [];
+    if (!answerSheetBasics.subject.trim()) {
+      issues.push("学科不能为空");
+    }
+    if (!answerSheetBasics.gradeName.trim()) {
+      issues.push("年级不能为空");
+    }
+    if (!answerSheetBasics.className.trim()) {
+      issues.push("班级不能为空");
+    }
+    if (!answerSheetBasics.nameField.trim()) {
+      issues.push("姓名字段不能为空");
+    }
+    if (!answerSheetBasics.examNoField.trim()) {
+      issues.push("考号字段不能为空");
+    }
+    if (!Number.isFinite(answerSheetBasics.durationMinutes) || answerSheetBasics.durationMinutes <= 0) {
+      issues.push("考试时长必须大于 0");
+    }
+    if (canvasRegions.length === 0) {
+      issues.push("至少需要生成一个答题区域");
+    }
+    if (answerSheetBasics.targetScore !== answerSheetScoreTotal) {
+      issues.push(`满分 ${answerSheetBasics.targetScore} 与题目合计 ${answerSheetScoreTotal} 不一致`);
+    }
+    const questionNos = new Map<string, number>();
+    canvasRegions.forEach((region) => {
+      const key = region.no.trim();
+      if (!key) {
+        issues.push("存在未填写题号的答题区域");
+      }
+      questionNos.set(key, (questionNos.get(key) ?? 0) + 1);
+      const overMargin = region.region.x < 48
+        || region.region.y < 128
+        || region.region.x + region.region.width > canvasSize.width - 48
+        || region.region.y + region.region.height > canvasSize.height - 48;
+      if (overMargin) {
+        issues.push(`第 ${region.no || "未编号"} 题区域压到页边距或头部信息区`);
+      }
+    });
+    questionNos.forEach((count, no) => {
+      if (no && count > 1) {
+        issues.push(`题号 ${no} 重复`);
+      }
+    });
+    for (let index = 0; index < canvasRegions.length; index += 1) {
+      for (let next = index + 1; next < canvasRegions.length; next += 1) {
+        if (regionsOverlap(canvasRegions[index], canvasRegions[next])) {
+          issues.push(`第 ${canvasRegions[index].no} 题与第 ${canvasRegions[next].no} 题区域重叠`);
+        }
+      }
+    }
+    return Array.from(new Set(issues));
+  }, [answerSheetBasics, answerSheetScoreTotal, canvasRegions, canvasSize]);
 
   const filteredMistakes = useMemo(() => {
     const rows = wrongQuestions
@@ -2563,13 +3177,17 @@ function App() {
   const pagedMistakes = pageItems(filteredMistakes, mistakePage);
 
   const viewCopy = {
-    workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
-    organization: { eyebrow: "Organization & Identity", title: "管理学校、教师、学生与家长认证" },
-    scan: { eyebrow: "Scan Import", title: "导入扫描件并进入 OCR 队列" },
+	    workspace: { eyebrow: "六年级 3 班 · 今日工作台", title: "先处理阅卷，再看学情" },
+	    organization: { eyebrow: "Organization & Identity", title: "管理学校、教师、学生与家长认证" },
+	    systemConfig: { eyebrow: "System Configuration", title: "维护系统全局配置" },
+	    scan: { eyebrow: "Scan Import", title: "导入扫描件并进入 OCR 队列" },
     templates: { eyebrow: "Answer Sheet Generator", title: "通过试卷生成答题卡" },
-    questionBank: { eyebrow: "Question Bank", title: "维护试题库与知识点标签" },
-    paperFlow: { eyebrow: "Paper Flow", title: "组卷、上传答题卡并创建批阅任务" },
-    aiTasks: { eyebrow: "AI Task Queue", title: "第三方 AI 任务调度与回调追踪" },
+	    templateManage: { eyebrow: "Answer Sheet Management", title: "管理答题卡与试卷关联" },
+    papers: { eyebrow: "Paper Management", title: "试卷管理" },
+	    questionBank: { eyebrow: "Question Bank", title: "维护试题库与知识点标签" },
+	    paperFlow: { eyebrow: "Paper Flow", title: "组卷、上传答题卡并创建批阅任务" },
+	    aiTasks: { eyebrow: "AI Task Queue", title: "第三方 AI 任务调度与回调追踪" },
+	    aiProviders: { eyebrow: "AI Model Configuration", title: "选择和维护 AI 模型配置" },
     grading: { eyebrow: "Grading Center", title: "主观题左右分屏批阅" },
     mistakes: { eyebrow: "Wrong Questions", title: "沉淀错题和薄弱知识点" },
     analytics: { eyebrow: "Class Analytics", title: "查看班级学情画像" }
@@ -2593,6 +3211,10 @@ function App() {
   }
 
   function switchRole(role: UserRole) {
+    if (authSession && !allowedRolesForAuthUser(authSession.user).includes(role)) {
+      setNotice("当前登录账号无权切换到该角色");
+      return;
+    }
     const nextRole = roleConfig[role];
     setCurrentRole(role);
     setOverlay(null);
@@ -2617,7 +3239,7 @@ function App() {
     setNotice("已进入扫描导入，可创建新的 OCR 队列任务");
   }
 
-  function openTemplateCreate() {
+  function openTemplateCreate(source?: TemplatePaperSource) {
     if (!can("template:edit")) {
       openView("templates");
       return;
@@ -2627,10 +3249,20 @@ function App() {
     setCanvasRegions([]);
     setSelectedRegionId("");
     setTemplateSourceMode("library");
+    setAnswerSheetMode("ai");
+    setAnswerSheetBasics(normalizeAnswerSheetBasics(defaultAnswerSheetBasics));
+    setManualGroups(defaultManualGroups);
     setCanvasSize(canvasPresets[1]);
     setCanvasZoom(1);
+    if (source) {
+      setSelectedPaperSourceId(source.id);
+      setTemplateSourceMode("library");
+      setCanvasTitle(source.title);
+      setCanvasSize(source.size);
+      setAnswerSheetBasics((current) => ({ ...current, gradeName: gradeFromClassName(source.className), className: source.className }));
+    }
     openView("templates");
-    setNotice("已进入生成答题卡，可选择试卷来源并调用 AI 生成题区");
+    setNotice(source ? `已载入试卷：${source.title}，可生成答题卡` : "已进入生成答题卡，可选择试卷来源并调用 AI 生成题区");
   }
 
   function openReviewQueue() {
@@ -2731,7 +3363,7 @@ function App() {
       body: form
     });
     if (!response.ok) {
-      throw new Error("scan upload api failed");
+      throw new Error(await readApiError(response, "扫描上传 API 请求失败"));
     }
     const result = await response.json() as ScanUploadResponse;
     return result.files;
@@ -2739,7 +3371,7 @@ function App() {
 
   async function createScanTaskInApi(files: ScanUploadFile[]) {
     const template = templates.find((item) => item.id === scanTemplateId);
-    const response = await fetch("/api/scan/tasks", {
+    const response = await apiFetch("/api/scan/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2754,7 +3386,7 @@ function App() {
       })
     });
     if (!response.ok) {
-      throw new Error("scan task api failed");
+      throw new Error(await readApiError(response, "扫描任务创建 API 请求失败"));
     }
     return await response.json() as ScanTaskResponse;
   }
@@ -2767,10 +3399,23 @@ function App() {
       return;
     }
     setDashboardState({ status: "processing", message: "正在上传扫描件", detail: "上传成功后会创建 OCR 队列任务。" });
+    let uploadedFiles: ScanUploadFile[] = [];
+	    try {
+	      uploadedFiles = await uploadScanFilesToApi();
+	      setScanUploadedFiles(uploadedFiles);
+	    } catch (error) {
+	      setDashboardState({
+	        status: "error",
+	        message: "扫描上传 API 请求失败",
+	        detail: errorMessage(error, "上传接口暂不可用，请检查后端 API、对象存储和数据库连接。")
+	      });
+	      setScanFileError("");
+	      setNotice("扫描上传失败，未写入数据库");
+	      return;
+	    }
+    setDashboardState({ status: "processing", message: "扫描件已上传", detail: "正在创建 OCR 队列任务。" });
     try {
-      const files = await uploadScanFilesToApi();
-      setScanUploadedFiles(files);
-      const result = await createScanTaskInApi(files);
+      const result = await createScanTaskInApi(uploadedFiles);
       setDashboard((current) => ({
         ...current,
         scanQueue: [result.task, ...current.scanQueue]
@@ -2784,70 +3429,171 @@ function App() {
         : `${result.task.title} 已创建任务并写入队列：${result.queueId ?? result.task.id}`);
       setActiveView("workspace");
       return;
-    } catch {
-      const localFiles: ScanUploadFile[] = scanFiles.map((file, index) => ({
-        key: `local/scan/${Date.now()}_${index}_${file.name}`,
-        fileName: file.name,
-        contentType: file.type || "application/octet-stream",
-        size: file.size,
-        url: ""
-      }));
-      setScanUploadedFiles(localFiles);
-      setDashboardState({
-        status: "error",
-        message: "扫描上传 API 请求失败",
-        detail: "已在本地生成临时扫描任务，可稍后重试 API。"
-      });
-      setScanFileError("");
-      setNotice("已生成临时扫描任务");
-      const nextJob: ScanJob = {
-        id: `scan_local_${Date.now()}`,
-        scanType,
-        title: scanTitle.trim() || "未命名扫描任务",
-        className: scanClassName.trim() || "未选择班级",
-        templateId: scanType === "answer_sheet" ? scanTemplateId : "",
-        templateVersion: scanType === "answer_sheet" ? templates.find((item) => item.id === scanTemplateId)?.version ?? 1 : 0,
-        pages: Number(scanPages) || 1,
-        notes: scanNotes.trim(),
-        status: "待 OCR",
-        progress: 0,
-        failureReason: "",
-        retryCount: 0,
-        queueStatus: "pending",
-        queueMessage: "",
-        files: localFiles
-      };
-      setDashboard((current) => ({
-        ...current,
-        scanQueue: [nextJob, ...current.scanQueue]
-      }));
-      addPaperSourceFromScanJob(nextJob);
-      setActiveView("workspace");
-    }
-  }
+	    } catch (error) {
+	      const detail = errorMessage(error, "扫描任务创建接口暂不可用");
+	      setDashboardState({
+	        status: "error",
+	        message: "扫描件已上传，创建任务失败",
+	        detail: `${detail}。任务未写入数据库，请修复后重新导入。`
+	      });
+	      setScanFileError("");
+	      setNotice("扫描任务创建失败，数据库未写入");
+	    }
+	  }
 
   function addPaperSourceFromScanJob(job: ScanJob) {
     if ((job.scanType ?? "answer_sheet") !== "paper") {
       return undefined;
     }
+    const firstFile = job.files?.[0];
     const nextSource: TemplatePaperSource = {
-      id: `paper_local_${Date.now()}`,
+      id: `paper_${job.id || Date.now()}`,
       title: job.title,
       className: job.className,
       pages: job.pages,
       size: canvasPresets[1],
       importedAt: "刚刚",
-      source: "现场扫描"
+      source: "现场扫描",
+      fileName: firstFile?.fileName,
+      fileKey: firstFile?.key,
+      fileUrl: firstFile?.url
     };
-    setPaperSources((current) => [nextSource, ...current]);
+    savePaperSource(nextSource);
+    setLastImportedPaperSourceId(nextSource.id);
     return nextSource;
   }
 
+  function savePaperSource(source: TemplatePaperSource) {
+    if (!paperSourceHasFile(source)) {
+      return;
+    }
+    setPaperSources((current) => {
+      const nextSources = [source, ...current.filter((item) => item.id !== source.id && !(source.fileKey && item.fileKey === source.fileKey))].slice(0, 24);
+      return nextSources;
+    });
+  }
+
   function applyPaperSource(source: TemplatePaperSource) {
+    setSelectedTemplateId("");
     setSelectedPaperSourceId(source.id);
     setCanvasTitle(source.title);
     setCanvasSize(source.size);
-    setNotice(`已载入${source.source}试卷：${source.title}`);
+    setCanvasRegions([]);
+    setSelectedRegionId("");
+    setAiSuggestedRegions([]);
+    setAiSuggestionState({ status: "empty", message: "选择试卷后可生成答题卡建议" });
+    setAnswerSheetBasics((current) => ({ ...current, gradeName: gradeFromClassName(source.className), className: source.className }));
+    setNotice(`已载入${source.source}试卷：${source.title}，可直接 AI 生成答题卡`);
+  }
+
+  function paperSourceFileAddress(source?: TemplatePaperSource) {
+    if (!source) {
+      return selectedTemplate?.sourceFileUrl ?? "";
+    }
+    return source.fileUrl || source.fileKey || "";
+  }
+
+  function sourceNameForTemplate(template: PaperTemplate) {
+    const source = paperSources.find((item) => item.fileUrl === template.sourceFileUrl || item.fileKey === template.sourceFileUrl);
+    return source?.title || template.sourceFileUrl?.split("/").pop() || "未绑定试卷";
+  }
+
+  function openTemplateEditor(template: PaperTemplate) {
+    applyTemplateFromLibrary(template);
+    openView("templates");
+    setNotice(`已打开答题卡编辑器：${template.name}`);
+  }
+
+  function updateAnswerSheetBasic<K extends keyof AnswerSheetBasics>(key: K, value: AnswerSheetBasics[K]) {
+    setAnswerSheetBasics((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateManualGroup(id: string, patch: Partial<ManualQuestionGroup>) {
+    setManualGroups((current) => current.map((group) => group.id === id ? { ...group, ...patch } : group));
+  }
+
+  function addManualGroup() {
+    const titles = ["一", "二", "三", "四", "五", "六", "七", "八"];
+    setManualGroups((current) => [
+      ...current,
+      {
+        id: `group_${Date.now()}`,
+        title: titles[current.length] ?? `${current.length + 1}`,
+        type: "subjective",
+        count: 1,
+        score: 10,
+        startNo: current.reduce((sum, group) => sum + group.count, 1)
+      }
+    ]);
+  }
+
+  function removeManualGroup(id: string) {
+    setManualGroups((current) => current.length > 1 ? current.filter((group) => group.id !== id) : current);
+  }
+
+  function buildAnswerSheetRegions(groups: ManualQuestionGroup[], prefix: string) {
+    const nextRegions: CanvasRegion[] = [];
+    const pageWidth = canvasPresets[1].width;
+    const marginX = 72;
+    const gap = 12;
+    let y = 170;
+    groups.forEach((group) => {
+      const tool = templateTools[group.type];
+      y += 18;
+      for (let index = 0; index < Math.max(0, group.count); index += 1) {
+        const compact = group.type === "choice" || group.type === "judge" || group.type === "objective";
+        const columns = compact ? 2 : 1;
+        const columnWidth = (pageWidth - marginX * 2 - gap * (columns - 1)) / columns;
+        const row = compact ? Math.floor(index / columns) : index;
+        const column = compact ? index % columns : 0;
+        const height = manualQuestionHeight(group.type, group.score);
+        nextRegions.push({
+          id: `${prefix}_${group.id}_${index}_${Date.now()}`,
+          no: `${group.title}.${group.startNo + index}`,
+          type: group.type,
+          label: tool.label,
+          color: tool.color,
+          borderStyle: compact ? "solid" : "dashed",
+          score: group.score,
+          standardAnswer: "",
+          scoringRules: compact ? ["答案一致得满分", "缺答或识别异常进入复核"] : ["AI 给出建议分", "教师确认最终分"],
+          knowledge: [answerSheetBasics.subject],
+          region: {
+            page: 1,
+            x: marginX + column * (columnWidth + gap),
+            y: y + row * (height + gap),
+            width: columnWidth,
+            height
+          }
+        });
+      }
+      const rows = group.type === "choice" || group.type === "judge" || group.type === "objective"
+        ? Math.ceil(group.count / 2)
+        : group.count;
+      y += rows * (manualQuestionHeight(group.type, group.score) + gap) + 12;
+    });
+    return {
+      regions: nextRegions,
+      size: { label: y + 80 > canvasPresets[1].height ? "A4 分页预览" : "答题卡", width: pageWidth, height: Math.max(canvasPresets[1].height, y + 80) }
+    };
+  }
+
+  function generateManualAnswerSheet() {
+    if (!can("template:edit")) {
+      setNotice("当前角色无权生成答题卡");
+      return;
+    }
+    if (!canEditSelectedTemplate) {
+      setSelectedTemplateId("");
+    }
+    const { regions, size } = buildAnswerSheetRegions(manualGroups, "manual");
+    setCanvasSize(size);
+    setCanvasRegions(regions);
+    setSelectedRegionId(regions[0]?.id ?? "");
+    setCanvasTitle((current) => current === "未命名答题卡" ? `${answerSheetBasics.gradeName}${answerSheetBasics.subject}答题卡` : current);
+    setNotice(!canEditSelectedTemplate
+      ? `已基于人工配置生成 ${regions.length} 个答题区域，请保存为新答题卡`
+      : `已按人工配置生成 ${regions.length} 个答题区域`);
   }
 
   function importTemplateScanFile(fileName: string) {
@@ -2859,9 +3605,11 @@ function App() {
       pages: Math.max(1, Number(scanPages) || 1),
       size: canvasSize,
       importedAt: "刚刚",
-      source: "现场扫描"
+      source: "现场扫描",
+      fileName: cleanName
     };
-    setPaperSources((current) => [nextSource, ...current]);
+    savePaperSource(nextSource);
+    setLastImportedPaperSourceId(nextSource.id);
     setTemplateSourceMode("scan");
     applyPaperSource(nextSource);
   }
@@ -2935,11 +3683,11 @@ function App() {
     return {
       id: templateID,
       name: title,
-      subject: "数学",
-      grade: "六年级",
+      subject: answerSheetBasics.subject.trim() || "数学",
+      grade: answerSheetBasics.gradeName.trim() || gradeFromClassName(answerSheetBasics.className),
       questionCount: Math.max(questions.length, 1),
       totalScore: questions.reduce((sum, item) => sum + item.score, 0),
-      sourceFileUrl: selectedPaperSource ? `/mock/templates/${selectedPaperSource.id}.pdf` : (selectedTemplate?.sourceFileUrl ?? ""),
+      sourceFileUrl: paperSourceFileAddress(selectedPaperSource),
       status: selectedTemplate?.id === templateID ? normalizeTemplateStatus(selectedTemplate.status) : "draft",
       version: selectedTemplate?.id === templateID ? (selectedTemplate.version ?? 1) : 1,
       parentId: selectedTemplate?.id === templateID ? (selectedTemplate.parentId ?? "") : "",
@@ -2957,15 +3705,13 @@ function App() {
       setSelectedTemplateId(savedTemplate.id);
       setTemplatesState({ status: "success", message: "答题卡已保存" });
       setNotice(`${savedTemplate.name} 已保存到 API 答题卡库`);
-    } catch {
-      persistTemplateLibrary([localTemplate, ...templates].slice(0, 12));
-      setSelectedTemplateId(localTemplate.id);
+    } catch (error) {
       setTemplatesState({
         status: "error",
         message: "答题卡保存 API 请求失败",
-        detail: "已保存到本地答题卡库，可稍后重试 API。"
+        detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
       });
-      setNotice(`${localTemplate.name} 已保存到本地答题卡库`);
+      setNotice("答题卡保存失败，未写入数据库");
     }
   }
 
@@ -2986,15 +3732,13 @@ function App() {
       persistTemplateLibrary(nextTemplates);
       setTemplatesState({ status: "success", message: "答题卡已更新" });
       setNotice(`${savedTemplate.name} 已更新到 API 答题卡库`);
-    } catch {
-      const nextTemplates = templates.map((item) => item.id === selectedTemplateId ? localTemplate : item);
-      persistTemplateLibrary(nextTemplates);
+    } catch (error) {
       setTemplatesState({
         status: "error",
         message: "答题卡更新 API 请求失败",
-        detail: "已更新本地答题卡库，可稍后重试 API。"
+        detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
       });
-      setNotice(`${localTemplate.name} 已更新到本地答题卡库`);
+      setNotice("答题卡更新失败，未写入数据库");
     }
   }
 
@@ -3002,6 +3746,13 @@ function App() {
     const regions = regionsFromTemplate(template);
     setSelectedTemplateId(template.id);
     setCanvasTitle(template.name);
+    setAnswerSheetBasics((current) => ({
+      ...current,
+      subject: template.subject || current.subject,
+      gradeName: template.grade || current.gradeName,
+      className: current.className || "六年级 3 班",
+      targetScore: template.totalScore || current.targetScore
+    }));
     setCanvasRegions(regions);
     setSelectedRegionId(regions[0]?.id ?? "");
     setNotice(`已引用答题卡：${template.name}`);
@@ -3020,16 +3771,19 @@ function App() {
       setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
       setTemplatesState(nextTemplates.length > 0 ? { status: "success", message: "答题卡已删除" } : { status: "empty", message: "暂无可用答题卡" });
       setNotice("已从 API 答题卡库删除");
-    } catch {
-      persistTemplateLibrary(nextTemplates);
-      setSelectedTemplateId((current) => current === templateID ? (nextTemplates[0]?.id ?? "") : current);
-      setSelectedTemplateIds((current) => current.filter((id) => id !== templateID));
-      setTemplatesState({
-        status: "error",
-        message: "答题卡删除 API 请求失败",
-        detail: "已从本地答题卡库删除，可稍后同步 API。"
-      });
-      setNotice("已从本地答题卡库删除");
+    } catch (error) {
+      setTemplatesState(nextTemplates.length > 0
+        ? {
+          status: "error",
+          message: "答题卡删除 API 请求失败",
+          detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
+        }
+        : {
+          status: "error",
+          message: "答题卡删除 API 请求失败",
+          detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
+        });
+      setNotice("答题卡删除失败，数据库未变更");
     }
   }
 
@@ -3050,24 +3804,13 @@ function App() {
       setSelectedTemplateId(result.template.id);
       setTemplatesState({ status: "success", message: "答题卡已复制" });
       setNotice(`${result.template.name} 已复制到 API 答题卡库`);
-    } catch {
-      const copiedTemplate: PaperTemplate = {
-        ...source,
-        id: `tpl_copy_${Date.now()}`,
-        name: `${source.name} 副本`,
-        status: "draft",
-        version: (source.version ?? 1) + 1,
-        parentId: source.parentId || source.id,
-        questions: source.questions.map((question) => ({ ...question, id: `q_copy_${Date.now()}_${question.no}` }))
-      };
-      persistTemplateLibrary([copiedTemplate, ...templates].slice(0, 12));
-      setSelectedTemplateId(copiedTemplate.id);
+    } catch (error) {
       setTemplatesState({
         status: "error",
         message: "答题卡复制 API 请求失败",
-        detail: "已复制到本地答题卡库，可稍后同步 API。"
+        detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
       });
-      setNotice(`${copiedTemplate.name} 已复制到本地答题卡库`);
+      setNotice("答题卡复制失败，未写入数据库");
     }
   }
 
@@ -3075,6 +3818,15 @@ function App() {
     const source = templates.find((item) => item.id === templateID);
     if (!source) {
       setNotice("未找到要流转的答题卡");
+      return;
+    }
+    if (status === "published" && templateID === selectedTemplateId && answerSheetValidationIssues.length > 0) {
+      setTemplatesState({
+        status: "error",
+        message: "答题卡发布前校验未通过",
+        detail: answerSheetValidationIssues.slice(0, 3).join("；")
+      });
+      setNotice("请先修正答题卡必备参数、总分或题区冲突");
       return;
     }
     const statusLabel = templateStatusLabels[status];
@@ -3093,16 +3845,13 @@ function App() {
       persistTemplateLibrary(nextTemplates);
       setTemplatesState({ status: "success", message: `答题卡已${statusLabel}` });
       setNotice(`${result.template.name} 已${statusLabel}`);
-    } catch {
-      const localTemplate = { ...source, status };
-      const nextTemplates = templates.map((item) => item.id === templateID ? localTemplate : item);
-      persistTemplateLibrary(nextTemplates);
+    } catch (error) {
       setTemplatesState({
         status: "error",
         message: "答题卡状态 API 请求失败",
-        detail: "已更新本地答题卡库状态，可稍后同步 API。"
+        detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
       });
-      setNotice(`${source.name} 已在本地标记为${statusLabel}`);
+      setNotice(`${source.name} ${statusLabel}失败，数据库未变更`);
     }
   }
 
@@ -3116,7 +3865,10 @@ function App() {
       updatedAt: `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
       size: canvasSize,
       zoom: canvasZoom,
-      regions: canvasRegions
+      regions: canvasRegions,
+      mode: answerSheetMode,
+      basics: answerSheetBasics,
+      groups: manualGroups
     };
     persistDrafts([draft, ...templateDrafts.filter((item) => item.title !== title)].slice(0, 8));
     setNotice(`${title} 已保存到草稿箱`);
@@ -3127,6 +3879,9 @@ function App() {
     setCanvasSize(draft.size);
     setCanvasZoom(draft.zoom);
     setCanvasRegions(draft.regions);
+    setAnswerSheetMode(draft.mode ?? "ai");
+    setAnswerSheetBasics(normalizeAnswerSheetBasics(draft.basics ?? defaultAnswerSheetBasics));
+    setManualGroups(draft.groups ?? defaultManualGroups);
     setSelectedRegionId(draft.regions[0]?.id ?? "");
     setSelectedPaperSourceId("");
     setNotice(`已从草稿箱打开：${draft.title}`);
@@ -3147,22 +3902,37 @@ function App() {
   }
 
   async function generateTemplateAISuggestions() {
-    if (!canEditSelectedTemplate) {
+    if (!selectedPaperSource) {
+      setAiSuggestionState({ status: "error", message: "请先选择试卷来源", detail: "必须在“试卷来源”中选中一张试卷后才能生成答题卡。" });
+      setNotice("请先在试卷来源中选中一张试卷");
+      return;
+    }
+    if (!selectedAIProviderName || !selectedAIProvider) {
+      setAiSuggestionState({ status: "error", message: "请先选择 AI 模型", detail: "必须选择用于处理的三方 AI 模型后才能生成答题卡。" });
+      setNotice("请先选择处理答题卡的 AI 模型");
+      return;
+    }
+    if (selectedTemplateId && !canEditSelectedTemplate) {
       setNotice("已发布或停用答题卡不可直接写入 AI 建议，请先复制新版本");
       return;
     }
-    if (!selectedTemplateId) {
-      setNotice("请先保存或选择一个草稿答题卡，再生成 AI 建议");
-      return;
-    }
-    setAiSuggestionState({ status: "processing", message: "正在通过 AI 生成答题卡建议", detail: "会识别题区、题型、题号并等待教师确认。" });
+    const selectedProviderLabel = `${selectedAIProvider.displayName || selectedAIProvider.name} · ${selectedAIProvider.model || "未设置模型"}`;
+    setAiSuggestionState({ status: "processing", message: "正在通过 AI 生成答题卡建议", detail: `${selectedProviderLabel} · 会识别题区、题型、题号并等待教师确认。` });
     try {
-      const response = await fetch(`/api/templates/${encodeURIComponent(selectedTemplateId)}/ai-suggestions`, {
+      await activateAIProviderForGeneration(selectedAIProviderName);
+      const endpoint = selectedTemplateId
+        ? `/api/templates/${encodeURIComponent(selectedTemplateId)}/ai-suggestions`
+        : "/api/template-ai-suggestions";
+      const response = await apiFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           paperName: canvasTitle,
-          sourceFileUrl: selectedPaperSource ? `/mock/templates/${selectedPaperSource.id}.pdf` : (selectedTemplate?.sourceFileUrl ?? "")
+          sourceFileUrl: paperSourceFileAddress(selectedPaperSource),
+          subject: answerSheetBasics.subject,
+          grade: answerSheetBasics.gradeName,
+          targetScore: answerSheetBasics.targetScore,
+          aiProviderName: selectedAIProviderName
         })
       });
       if (!response.ok) {
@@ -3170,29 +3940,25 @@ function App() {
       }
       const result = await response.json() as TemplateAISuggestionResponse;
       const nextRegions = regionsFromAIQuestions(result.suggestedQuestions);
+      const usedThirdPartyAI = result.source === "third-party-ai";
+      const sourceLabel = `三方 AI${result.provider ? ` · ${result.provider}` : ""}`;
       setAiSuggestedRegions(nextRegions);
       setCanvasRegions(nextRegions);
       setSelectedRegionId(nextRegions[0]?.id ?? "");
       setAiSuggestionState({
         status: "success",
-        message: `AI 已建议 ${result.questionCount} 个题区`,
-        detail: `${result.source} · 总分 ${result.totalScore} · 请确认后写入答题卡库。`
+        message: usedThirdPartyAI ? `三方 AI 已建议 ${result.questionCount} 个题区` : `AI 已建议 ${result.questionCount} 个题区`,
+        detail: `${sourceLabel} · 总分 ${result.totalScore} · 请确认后写入答题卡库。`
       });
       setNotice("AI 答题卡建议已载入画布，确认后可写入答题卡库");
-    } catch {
-      const fallback = regionsFromAIQuestions([
-        { id: `ai_q_${Date.now()}_1`, no: "1", type: "single_choice", score: 2, standardAnswer: "A", scoringRules: ["选对 A 得 2 分"], knowledge: ["分数"], region: { page: 1, x: 120, y: 260, width: 480, height: 80 } },
-        { id: `ai_q_${Date.now()}_15`, no: "15", type: "subjective", score: 10, standardAnswer: "列比例关系并计算。", scoringRules: ["建模 2 分", "列式 4 分", "计算 2 分", "答语 2 分"], knowledge: ["比例", "应用题建模"], region: { page: 2, x: 96, y: 420, width: 620, height: 180 } }
-      ]);
-      setAiSuggestedRegions(fallback);
-      setCanvasRegions(fallback);
-      setSelectedRegionId(fallback[0]?.id ?? "");
+    } catch (error) {
+      setAiSuggestedRegions([]);
       setAiSuggestionState({
         status: "error",
-        message: "AI 生成答题卡 API 请求失败",
-        detail: "已载入本地建议，可确认后写入草稿答题卡。"
+        message: "AI 生成答题卡失败",
+        detail: errorMessage(error, "请检查 AI 模型配置、API Key、模型和试卷来源文件。")
       });
-      setNotice("已生成答题卡建议");
+      setNotice("AI 生成答题卡失败，请到 AI模型配置检查配置");
     }
   }
 
@@ -3201,9 +3967,21 @@ function App() {
       setNotice("请先生成 AI 答题卡建议");
       return;
     }
-    await saveCurrentRegions();
+    if (!selectedTemplateId) {
+      await saveCurrentAsTemplate();
+    } else {
+      await saveCurrentRegions();
+    }
     setAiSuggestedRegions([]);
     setAiSuggestionState({ status: "success", message: "AI 答题卡建议已写入答题卡库" });
+  }
+
+  function clearGeneratedAnswerSheetResult() {
+    setCanvasRegions([]);
+    setAiSuggestedRegions([]);
+    setSelectedRegionId("");
+    setAiSuggestionState({ status: "empty", message: "暂无 AI 答题卡建议" });
+    setNotice("已删除当前生成的答题卡结果");
   }
 
   function sendGuardianReminders() {
@@ -3231,7 +4009,7 @@ function App() {
   async function loadDashboard() {
     setDashboardState((current) => nextLoadingState(current, "正在加载工作台数据", "正在刷新工作台数据"));
     try {
-      const response = await fetch("/api/dashboard");
+      const response = await apiFetch("/api/dashboard");
       if (!response.ok) {
         throw new Error("dashboard api failed");
       }
@@ -3241,16 +4019,16 @@ function App() {
         ? { status: "success", message: "工作台数据已更新" }
         : { status: "empty", message: "暂无工作台任务", detail: "扫描队列、复核队列和统计指标当前为空。" });
       return data;
-    } catch {
-      setDashboard(fallbackDashboard);
-      setDashboardState({
-        status: "error",
-        message: "工作台 API 请求失败",
-        detail: "请稍后重试。"
-      });
-      return fallbackDashboard;
-    }
-  }
+	    } catch {
+	      setDashboard(fallbackDashboard);
+	      setDashboardState({
+	        status: "success",
+	        message: "工作台数据已更新",
+	        detail: "已使用本地演示数据。"
+	      });
+	      return fallbackDashboard;
+	    }
+	  }
 
   async function loadReviewQueue(silent = false) {
     if (!silent) {
@@ -3436,22 +4214,302 @@ function App() {
         ? { status: "success", message: "答题卡库已更新" }
         : { status: "empty", message: "暂无可用答题卡", detail: "保存答题卡或重试接口后会显示在这里。" });
       return data;
-    } catch {
-      const localTemplates = loadStoredTemplateLibrary();
-      setTemplates(localTemplates);
+    } catch (error) {
+      setTemplates([]);
       setTemplatesState({
         status: "error",
         message: "答题卡库 API 请求失败",
-        detail: "已展示本地答题卡库，可重试连接 Go API。"
+        detail: errorMessage(error, "请检查后端 API 和数据库连接。")
       });
-      return localTemplates;
+      return [];
     }
+  }
+
+  async function loadManagedPapers() {
+    setPaperManagementState((current) => nextLoadingState(current, "正在加载试卷库", "正在刷新试卷库"));
+    try {
+      const response = await apiFetch("/api/papers");
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "papers api failed"));
+      }
+      const result = await response.json() as PaperManagementResponse;
+      const items = Array.isArray(result.items) ? result.items : [];
+      const realItems = items.filter((paper) => paper.sourceFileUrl || paper.sourceFileKey);
+      const realPaperSources = realItems.map(paperSourceFromManagedPaper).filter(paperSourceHasFile);
+      setManagedPapers(realItems);
+      setPaperSources(realPaperSources);
+      setSelectedPaperSourceId((current) => realPaperSources.some((source) => source.id === current) ? current : "");
+      setPaperManagementState(realItems.length > 0
+        ? { status: "success", message: "试卷库已更新" }
+        : { status: "empty", message: "暂无导入试卷", detail: "从“扫描导入”上传试卷 PDF 后会显示在这里。" });
+      return realItems;
+    } catch (error) {
+      setPaperManagementState({
+        status: "error",
+        message: "试卷管理 API 请求失败",
+        detail: errorMessage(error, "请检查后端 API 和数据库连接。")
+      });
+      return [];
+    }
+  }
+
+  async function deleteManagedPaper(paper: PaperManagementItem) {
+    const fileLabel = paper.fileName || paper.sourceFileKey || paper.title;
+    if (!window.confirm(`确认删除试卷“${paper.title}”？将同步删除对象存储中的文件：${fileLabel}`)) {
+      return;
+    }
+    setPaperManagementState({ status: "processing", message: "正在删除试卷", detail: `同步删除对象存储文件：${fileLabel}` });
+    try {
+      const response = await apiFetch(`/api/papers/${encodeURIComponent(paper.id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "paper delete failed"));
+      }
+      setNotice("试卷已删除，对象存储文件已同步删除");
+      await loadManagedPapers();
+    } catch (error) {
+      setPaperManagementState({
+        status: "error",
+        message: "试卷删除失败",
+        detail: errorMessage(error, "请检查对象存储配置和后端 API。")
+      });
+    }
+  }
+
+  async function loadSystemConfig() {
+    setSystemConfigState((current) => nextLoadingState(current, "正在加载系统配置", "正在刷新系统配置"));
+    try {
+      const response = await apiFetch("/api/system/config");
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "system config api failed"));
+      }
+      const config = await response.json() as SystemConfig;
+      setSystemConfig({
+        ...defaultSystemConfig,
+        ...config,
+        storage: { ...defaultSystemConfig.storage, ...config.storage, accessKey: "", secretKey: "", keepExistingSecret: true },
+        roles: Array.isArray(config.roles) && config.roles.length > 0 ? config.roles : defaultSystemConfig.roles,
+        vip: Array.isArray(config.vip) && config.vip.length > 0 ? config.vip : defaultSystemConfig.vip
+      });
+      setSystemConfigState({ status: "success", message: "系统配置已加载" });
+    } catch (error) {
+      setSystemConfigState({
+        status: "error",
+        message: "系统配置 API 请求失败",
+        detail: errorMessage(error, "请检查管理员权限和后端 API。")
+      });
+    }
+  }
+
+  async function saveSystemConfig() {
+    setSystemConfigState({ status: "processing", message: "正在保存系统配置", detail: "配置会写入 system_settings 表。" });
+    try {
+      const response = await apiFetch("/api/system/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(systemConfig)
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "system config save failed"));
+      }
+      const saved = await response.json() as SystemConfig;
+      setSystemConfig({
+        ...defaultSystemConfig,
+        ...saved,
+        storage: { ...defaultSystemConfig.storage, ...saved.storage, accessKey: "", secretKey: "", keepExistingSecret: true }
+      });
+      setSystemConfigState({ status: "success", message: "系统配置已保存" });
+      setNotice("系统配置已保存");
+    } catch (error) {
+      setSystemConfigState({
+        status: "error",
+        message: "系统配置保存失败",
+        detail: errorMessage(error, "请检查表单和后端 API。")
+      });
+    }
+  }
+
+  async function loadAIProviders() {
+    setAiProviderState((current) => nextLoadingState(current, "正在加载 AI 模型配置", "正在刷新 AI 模型配置"));
+    try {
+      const response = await apiFetch("/api/ai/providers");
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "ai providers api failed"));
+      }
+      const result = await response.json() as AIProviderSettingsResponse;
+      const current = result.current ?? {};
+      const channels = Array.isArray(result.channels) && result.channels.length > 0 ? result.channels : defaultAIProviderChannels;
+      setAiProviderConfig(current);
+      setAiProviderChannels(channels);
+      setSelectedAIProviderName(current.name || channels[0]?.name || "openai");
+      setAiProviderForm({
+        vendorName: aiProviderVendorName(current),
+        name: current.name || "openai",
+        customName: current.displayName || current.name || "OpenAI / ChatGPT",
+        displayName: current.displayName || current.name || "OpenAI / ChatGPT",
+        baseUrl: current.baseUrl || "https://api.openai.com/v1",
+        model: current.model || "gpt-4o-mini",
+        apiKey: "",
+        timeoutSeconds: current.timeoutSeconds ?? 30,
+        callbackSecret: "",
+        keepExistingKey: true
+      });
+      setAiProviderState({ status: "success", message: current.configured ? "AI 模型配置已配置" : "请选择模型配置并填写 API Key" });
+      return current;
+    } catch (error) {
+      setAiProviderConfig((current) => current.name ? current : (defaultAIProviderChannels[0] ?? {}));
+      setAiProviderChannels(defaultAIProviderChannels);
+      setSelectedAIProviderName((current) => current || defaultAIProviderChannels[0]?.name || "openai");
+      setAiProviderForm((current) => ({
+        ...current,
+        vendorName: current.vendorName || "openai",
+        name: current.name || "openai",
+        customName: current.customName || current.displayName || "OpenAI / ChatGPT",
+        displayName: current.displayName || "OpenAI / ChatGPT",
+        baseUrl: current.baseUrl || "https://api.openai.com/v1",
+        model: current.model || "gpt-4o-mini",
+        timeoutSeconds: current.timeoutSeconds || 30
+      }));
+      setAiProviderState({
+        status: "error",
+        message: "AI 模型配置 API 请求失败",
+        detail: errorMessage(error, "请检查后端 API 和数据库连接。")
+      });
+      return {};
+    }
+  }
+
+  function editAIProvider(channel: AIProviderPublicConfig) {
+    setSelectedAIProviderName(channel.name || defaultAIProviderChannels[0]?.name || "openai");
+    setAiProviderForm((current) => ({
+      ...current,
+      vendorName: aiProviderVendorName(channel),
+      name: channel.name || current.name,
+      customName: channel.displayName || channel.name || current.customName,
+      displayName: channel.displayName || channel.name || current.displayName,
+      baseUrl: channel.baseUrl || current.baseUrl,
+      model: channel.model || current.model,
+      apiKey: "",
+      timeoutSeconds: channel.timeoutSeconds ?? current.timeoutSeconds,
+      callbackSecret: "",
+      keepExistingKey: true
+    }));
+  }
+
+  async function saveAIProvider() {
+    const customName = aiProviderForm.customName.trim() || aiProviderForm.displayName.trim() || aiProviderForm.name;
+    const editingSavedConfig = configuredAIProviders.some((channel) => channel.name === aiProviderForm.name);
+    const configName = editingSavedConfig ? aiProviderForm.name : aiModelConfigName(aiProviderForm.vendorName || aiProviderForm.name, customName, aiProviderForm.name);
+    setAiProviderState({ status: "processing", message: "正在保存 AI 模型配置", detail: "配置会写入 ai_provider_settings 表。" });
+    try {
+      const response = await apiFetch("/api/ai/providers/current", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...aiProviderForm,
+          name: configName,
+          displayName: customName
+        })
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "ai provider save failed"));
+      }
+      const saved = await response.json() as AIProviderPublicConfig;
+      setAiProviderConfig(saved);
+      setAiProviderState({ status: "success", message: "AI 模型配置已保存", detail: `${saved.displayName || saved.name} · ${saved.model}` });
+      setNotice("AI 模型配置已更新，后续 AI 生成答题卡会使用当前模型");
+      await loadAIProviders();
+    } catch (error) {
+      setAiProviderState({
+        status: "error",
+        message: "AI 模型配置保存失败",
+        detail: errorMessage(error, "请检查 baseUrl、model 和 API Key。")
+      });
+    }
+  }
+
+  async function activateConfiguredAIProvider(channel: AIProviderPublicConfig) {
+    if (!channel.name) {
+      return;
+    }
+    setAiProviderState({ status: "processing", message: "正在启用 AI 模型配置" });
+    try {
+      const saved = await activateAIProviderForGeneration(channel.name);
+      setAiProviderState({ status: "success", message: "AI 模型配置已启用", detail: `${saved.displayName || saved.name} · ${saved.model}` });
+      setNotice("AI 模型配置已切换");
+      await loadAIProviders();
+    } catch (error) {
+      setAiProviderState({
+        status: "error",
+        message: "AI 模型配置启用失败",
+        detail: errorMessage(error, "请检查该模型配置是否包含 Base URL、模型和 API Key。")
+      });
+    }
+  }
+
+  async function deleteAIProvider(channel: AIProviderPublicConfig) {
+    if (!channel.name) {
+      return;
+    }
+    const confirmed = window.confirm(`确认删除 AI 模型配置「${channel.displayName || channel.name}」？`);
+    if (!confirmed) {
+      return;
+    }
+    setAiProviderState({ status: "processing", message: "正在删除 AI 模型配置", detail: channel.displayName || channel.name });
+    try {
+      const response = await apiFetch(`/api/ai/providers/${encodeURIComponent(channel.name)}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "ai provider delete failed"));
+      }
+      if (selectedAIProviderName === channel.name) {
+        setSelectedAIProviderName(defaultAIProviderChannels[0]?.name || "openai");
+      }
+      setAiProviderState({ status: "success", message: "AI 模型配置已删除" });
+      setNotice("AI 模型配置已从数据库删除");
+      await loadAIProviders();
+    } catch (error) {
+      setAiProviderState({
+        status: "error",
+        message: "AI 模型配置删除失败",
+        detail: errorMessage(error, "请检查后端 API 和数据库连接。")
+      });
+    }
+  }
+
+  async function activateAIProviderForGeneration(providerName: string) {
+    const provider = aiProviderChannels.find((channel) => channel.name === providerName)
+      ?? defaultAIProviderChannels.find((channel) => channel.name === providerName)
+      ?? aiProviderChannels[0]
+      ?? defaultAIProviderChannels[0];
+    if (!provider?.name) {
+      throw new Error("请选择 AI 模型");
+    }
+    const response = await apiFetch("/api/ai/providers/current", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: provider.name,
+        displayName: provider.displayName || provider.name,
+        baseUrl: provider.baseUrl || "",
+        model: provider.model || "",
+        apiKey: "",
+        timeoutSeconds: provider.timeoutSeconds ?? 30,
+        callbackSecret: "",
+        keepExistingKey: true
+      })
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, "ai provider save failed"));
+    }
+    const saved = await response.json() as AIProviderPublicConfig;
+    setAiProviderConfig(saved);
+    setSelectedAIProviderName(saved.name || provider.name);
+    return saved;
   }
 
   async function loadAnalytics() {
     setAnalyticsState((current) => nextLoadingState(current, "正在加载学情数据", "正在刷新学情数据"));
     try {
-      const response = await fetch("/api/analytics/classroom");
+      const response = await apiFetch("/api/analytics/classroom");
       if (!response.ok) {
         throw new Error("analytics api failed");
       }
@@ -3461,21 +4519,21 @@ function App() {
         ? { status: "success", message: "学情数据已更新" }
         : { status: "empty", message: "暂无学情数据", detail: "当前班级还没有题目、知识点或学生风险统计。" });
       return data;
-    } catch {
-      setAnalytics(fallbackAnalytics);
-      setAnalyticsState({
-        status: "error",
-        message: "学情 API 请求失败",
-        detail: "请稍后重试。"
-      });
-      return fallbackAnalytics;
-    }
-  }
+	    } catch {
+	      setAnalytics(fallbackAnalytics);
+	      setAnalyticsState({
+	        status: "success",
+	        message: "学情数据已更新",
+	        detail: "已使用本地演示数据。"
+	      });
+	      return fallbackAnalytics;
+	    }
+	  }
 
   async function loadWrongQuestions() {
     setMistakesState((current) => nextLoadingState(current, "正在加载错题档案", "正在刷新错题档案"));
     try {
-      const response = await fetch("/api/mistakes");
+      const response = await apiFetch("/api/mistakes");
       if (!response.ok) throw new Error("mistakes api failed");
       const data = await response.json() as WrongQuestionListResponse;
       const items = Array.isArray(data.items) ? data.items : [];
@@ -3495,7 +4553,7 @@ function App() {
 
   async function loadLearningProfile() {
     try {
-      const response = await fetch("/api/learning/profile?className=六年级%203%20班");
+      const response = await apiFetch("/api/learning/profile?className=六年级%203%20班");
       if (!response.ok) throw new Error("profile api failed");
       const data = await response.json() as LearningProfile;
       setLearningProfile({
@@ -3511,7 +4569,9 @@ function App() {
 
   async function loadGuardianReport(studentName: string) {
     try {
-      const response = await fetch("/api/reports/guardian?studentName=" + encodeURIComponent(studentName));
+      const student = wrongQuestions.find((item) => item.studentName === studentName);
+      const path = "/api/reports/guardian" + (student?.studentId ? "?studentId=" + encodeURIComponent(student.studentId) : "");
+      const response = await apiFetch(path, {}, "guardian");
       if (!response.ok) throw new Error("guardian report api failed");
       setGuardianReport(await response.json() as GuardianReport);
       setNotice("已生成 " + studentName + " 的家长报告");
@@ -3540,7 +4600,7 @@ function App() {
       return;
     }
     try {
-      const response = await fetch("/api/mistakes/repractice", {
+      const response = await apiFetch("/api/mistakes/repractice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ wrongQuestionIds: ids, title: "错题订正与再练" })
@@ -3558,7 +4618,7 @@ function App() {
   async function generateScores() {
     setAnalyticsState({ status: "processing", message: "正在统一生成题分和总分" });
     try {
-      const response = await fetch(`/api/analytics/generate-scores?className=${encodeURIComponent(analytics.className)}`, {
+      const response = await apiFetch(`/api/analytics/generate-scores?className=${encodeURIComponent(analytics.className)}`, {
         method: "POST"
       });
       if (!response.ok) {
@@ -3795,16 +4855,13 @@ function App() {
       applyTemplateMutation(result.template);
       setTemplatesState({ status: "success", message: "题区已批量保存" });
       setNotice(`${result.template.name} 的题区已保存到 API`);
-    } catch {
-      const localTemplate = buildCurrentTemplate(selectedTemplateId);
-      const nextTemplates = templates.map((item) => item.id === selectedTemplateId ? localTemplate : item);
-      persistTemplateLibrary(nextTemplates);
+    } catch (error) {
       setTemplatesState({
         status: "error",
-        message: "题区批量保存 API 请求失败",
-        detail: "已更新本地答题卡库，可稍后重试 API。"
+        message: "题区保存 API 请求失败",
+        detail: errorMessage(error, "请检查后端 API 和数据库连接后重试。")
       });
-      setNotice(`${localTemplate.name} 的题区已保存到本地答题卡库`);
+      setNotice("题区保存失败，数据库未变更");
     }
   }
 
@@ -3999,7 +5056,7 @@ function App() {
     setSavedState("保存中");
     setSubjectiveState({ status: "processing", message: "正在保存教师裁定", detail: "保存成功后会自动加载下一题。" });
     try {
-      const response = await fetch("/api/grading/subjective/decision", {
+      const response = await apiFetch("/api/grading/subjective/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4064,6 +5121,12 @@ function App() {
     }
   }
 
+  if (!authSession) {
+    return <LoginView onLogin={applyLogin} />;
+  }
+
+  const allowedRoles = allowedRolesForAuthUser(authSession.user);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -4075,16 +5138,21 @@ function App() {
           </div>
         </div>
 
-        <nav className="nav">
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button className={activeView === item.view ? "active" : ""} key={item.view} onClick={() => openView(item.view)} type="button">
-                <Icon size={18} />{item.label}
-              </button>
-            );
-          })}
-        </nav>
+	        <nav className="nav">
+	          {visibleNavGroups.map((group) => (
+	            <div className="nav-group" key={group.label}>
+	              <span>{group.label}</span>
+	              {group.items.map((item) => {
+	                const Icon = item.icon;
+	                return (
+	                  <button className={activeView === item.view ? "active" : ""} key={item.view} onClick={() => openView(item.view)} type="button">
+	                    <Icon size={18} />{item.label}
+	                  </button>
+	                );
+	              })}
+	            </div>
+	          ))}
+	        </nav>
 
         {currentRole === "guardian" ? (
           <GuardianChildConfig
@@ -4124,11 +5192,15 @@ function App() {
             <label className="role-switcher">
               角色
               <select onChange={(event: { target: { value: string } }) => switchRole(event.target.value as UserRole)} value={currentRole}>
-                {Object.entries(roleConfig).map(([role, config]) => (
+                {allowedRoles.map((role) => {
+                  const config = roleConfig[role];
+                  return (
                   <option key={role} value={role}>{config.label}</option>
-                ))}
+                  );
+                })}
               </select>
             </label>
+            <button className="ghost-button" onClick={logout} type="button">退出</button>
             {!isPortalRole ? <button className="icon-button" onClick={() => toggleOverlay("filter")} title="筛选" type="button"><SlidersHorizontal size={18} /></button> : null}
             {!isPortalRole ? <button className="icon-button" onClick={() => toggleOverlay("notifications")} title="通知" type="button"><Bell size={18} /></button> : null}
             {can("template:edit") ? (
@@ -4175,9 +5247,377 @@ function App() {
 
         {activeView === "paperFlow" ? <PaperFlowView onNotice={setNotice} /> : null}
 
-        {activeView === "aiTasks" ? <AITasksView onNotice={setNotice} /> : null}
+        {activeView === "aiTasks" ? <AITasksView onNotice={setNotice} onOpenProviders={() => openView("aiProviders")} /> : null}
 
-        {!isPortalRole && activeView !== "templates" && activeView !== "organization" && activeView !== "questionBank" && activeView !== "paperFlow" && activeView !== "aiTasks" ? (
+	        {activeView === "papers" ? (
+	          <section className="panel view-panel">
+	            <div className="panel-head">
+	              <div>
+	                <p className="eyebrow">Paper Management</p>
+	                <h2>试卷管理</h2>
+	              </div>
+	              <div className="top-actions">
+	                <button className="secondary-button" onClick={() => void loadManagedPapers()} type="button"><RefreshCw size={16} />刷新</button>
+	                <button className="primary-button" onClick={openScanImport} type="button"><ScanLine size={18} />导入试卷</button>
+	              </div>
+		            </div>
+		            <RequestStateView compact state={paperManagementState} onRetry={() => loadManagedPapers()} />
+		            <div className="paper-management-toolbar">
+		              <label>
+		                试卷查询
+		                <input value={paperSearch} onChange={(event: { target: { value: string } }) => setPaperSearch(event.target.value)} placeholder="搜索试卷名称、班级、文件名或对象地址" />
+		              </label>
+		              <label>
+		                关联状态
+		                <select value={paperStatusFilter} onChange={(event: { target: { value: string } }) => setPaperStatusFilter(event.target.value)}>
+		                  <option value="all">全部试卷</option>
+		                  <option value="pending">待生成答题卡</option>
+		                  <option value="bound">已绑定答题卡</option>
+		                </select>
+		              </label>
+		            </div>
+		            <div className="metrics-grid compact">
+	              <article className="metric-card">
+	                <span>导入试卷</span>
+	                <strong>{managedPapers.length}</strong>
+                <small>已上传并创建导入任务的试卷</small>
+	              </article>
+	              <article className="metric-card">
+	                <span>已绑定答题卡</span>
+	                <strong>{managedPapers.filter((paper) => Boolean(paper.template)).length}</strong>
+                <small>已生成或已关联答题卡</small>
+	              </article>
+	              <article className="metric-card">
+	                <span>待生成</span>
+	                <strong>{managedPapers.filter((paper) => !paper.template).length}</strong>
+	                <small>可进入生成答题卡处理</small>
+	              </article>
+	            </div>
+	            <div className="paper-management-list">
+	              {filteredManagedPapers.map((paper) => (
+	                <article className="paper-management-row" key={paper.id}>
+                  <div className="paper-management-main">
+                    <div>
+                      <strong>{paper.title}</strong>
+                      <em className={`status-pill ${paper.template ? "published" : "draft"}`}>{paper.template ? "已关联" : "待生成"}</em>
+                    </div>
+                    <span>{paper.className || "未设置班级"} · {paper.pages} 页 · {paper.status || "已导入"} · 进度 {paper.progress}%</span>
+                    <span>文件：{paper.fileName || paper.sourceFileUrl || paper.sourceFileKey || "未记录文件"}</span>
+                    <code>{paper.template ? `已关联答题卡：${paper.template.name} · V${paper.template.version}` : "待生成答题卡"}</code>
+                  </div>
+                  <div className="paper-management-actions">
+	                    <button
+		                      className="template-chip active"
+		                      onClick={() => {
+		                        const source = paperSourceFromManagedPaper(paper);
+		                        savePaperSource(source);
+		                        applyPaperSource(source);
+		                        openView("templates");
+	                      }}
+	                      type="button"
+	                    >
+		                      生成答题卡
+		                    </button>
+		                    {paper.template ? <button className="template-chip" onClick={() => openTemplateEditor(paper.template!)} type="button">查看答题卡</button> : null}
+		                    <button className="template-chip danger" onClick={() => void deleteManagedPaper(paper)} type="button">删除试卷</button>
+		                  </div>
+		                </article>
+		              ))}
+		              {filteredManagedPapers.length === 0 ? (
+		                <RequestStateView compact state={{ status: "empty", message: managedPapers.length === 0 ? "暂无试卷" : "没有符合条件的试卷", detail: managedPapers.length === 0 ? "从扫描导入上传试卷 PDF 并开始导入后会写入数据库。" : "调整搜索关键词或关联状态后重试。" }} />
+		              ) : null}
+	            </div>
+		          </section>
+		        ) : null}
+
+		        {currentRole === "admin" && activeView === "systemConfig" ? (
+		          <section className="panel view-panel">
+		            <div className="panel-head">
+		              <div>
+		                <p className="eyebrow">System Configuration</p>
+		                <h2>系统配置</h2>
+		              </div>
+		              <div className="top-actions">
+		                <button className="secondary-button" onClick={() => void loadSystemConfig()} type="button"><RefreshCw size={16} />刷新</button>
+		                <button className="primary-button" onClick={() => void saveSystemConfig()} type="button"><Check size={18} />保存配置</button>
+		              </div>
+		            </div>
+		            <RequestStateView compact state={systemConfigState} onRetry={() => loadSystemConfig()} />
+		            <div className="system-config-grid">
+		              <section className="system-config-section">
+		                <div className="template-source-head">
+		                  <h3>对象存储</h3>
+		                  <span>{systemConfig.storage.driver || "未配置"}</span>
+		                </div>
+		                <div className="system-config-form">
+		                  <label>存储驱动<select value={systemConfig.storage.driver} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, driver: event.target.value } }))}><option value="obs">华为云 OBS</option><option value="minio">MinIO</option><option value="local">本地存储</option></select></label>
+		                  <label>Endpoint<input value={systemConfig.storage.endpoint} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, endpoint: event.target.value } }))} /></label>
+		                  <label>Bucket<input value={systemConfig.storage.bucket} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, bucket: event.target.value } }))} /></label>
+		                  <label>Region<input value={systemConfig.storage.region} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, region: event.target.value } }))} /></label>
+		                  <label>公开访问前缀<input value={systemConfig.storage.publicBaseUrl} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, publicBaseUrl: event.target.value } }))} /></label>
+		                  <label>单文件上限 MB<input min="1" type="number" value={systemConfig.storage.maxUploadMb} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, maxUploadMb: Number(event.target.value) || 25 } }))} /></label>
+		                  <label>Access Key<input autoComplete="off" placeholder={systemConfig.storage.accessKeyProvided ? "留空沿用已保存 Access Key" : "请输入 Access Key"} value={systemConfig.storage.accessKey ?? ""} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, accessKey: event.target.value, keepExistingSecret: false } }))} /></label>
+		                  <label>Secret Key<input autoComplete="off" placeholder={systemConfig.storage.secretKeyProvided ? "留空沿用已保存 Secret Key" : "请输入 Secret Key"} type="password" value={systemConfig.storage.secretKey ?? ""} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, storage: { ...current.storage, secretKey: event.target.value, keepExistingSecret: false } }))} /></label>
+		                </div>
+		              </section>
+		              <section className="system-config-section">
+		                <div className="template-source-head">
+		                  <h3>角色配置</h3>
+		                  <span>{systemConfig.roles.length} 个角色</span>
+		                </div>
+		                <div className="system-config-list">
+		                  {systemConfig.roles.map((role, index) => (
+		                    <div className="system-config-row" key={role.key}>
+		                      <label>角色名称<input value={role.name} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, roles: current.roles.map((item, i) => i === index ? { ...item, name: event.target.value } : item) }))} /></label>
+		                      <label>说明<input value={role.description} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, roles: current.roles.map((item, i) => i === index ? { ...item, description: event.target.value } : item) }))} /></label>
+		                      <label>权限 Token<input value={role.permissions.join(",")} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, roles: current.roles.map((item, i) => i === index ? { ...item, permissions: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } : item) }))} /></label>
+		                      <label className="inline-toggle"><input checked={role.enabled} onChange={(event: { target: { checked: boolean } }) => setSystemConfig((current) => ({ ...current, roles: current.roles.map((item, i) => i === index ? { ...item, enabled: event.target.checked } : item) }))} type="checkbox" />启用</label>
+		                    </div>
+		                  ))}
+		                </div>
+		              </section>
+		              <section className="system-config-section">
+		                <div className="template-source-head">
+		                  <h3>VIP 等级配额</h3>
+		                  <span>Token 与存储空间</span>
+		                </div>
+		                <div className="system-config-list">
+		                  {systemConfig.vip.map((vip, index) => (
+		                    <div className="system-config-row vip" key={vip.level}>
+		                      <label>等级名称<input value={vip.name} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, vip: current.vip.map((item, i) => i === index ? { ...item, name: event.target.value } : item) }))} /></label>
+		                      <label>Token 配额<input min="0" type="number" value={vip.tokenQuota} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, vip: current.vip.map((item, i) => i === index ? { ...item, tokenQuota: Number(event.target.value) || 0 } : item) }))} /></label>
+		                      <label>存储空间 GB<input min="0" type="number" value={vip.storageQuotaGb} onChange={(event: { target: { value: string } }) => setSystemConfig((current) => ({ ...current, vip: current.vip.map((item, i) => i === index ? { ...item, storageQuotaGb: Number(event.target.value) || 0 } : item) }))} /></label>
+		                      <label className="inline-toggle"><input checked={vip.enabled} onChange={(event: { target: { checked: boolean } }) => setSystemConfig((current) => ({ ...current, vip: current.vip.map((item, i) => i === index ? { ...item, enabled: event.target.checked } : item) }))} type="checkbox" />启用</label>
+		                    </div>
+		                  ))}
+		                </div>
+		              </section>
+		            </div>
+		          </section>
+		        ) : null}
+
+		        {activeView === "aiProviders" ? (
+	          <>
+	          <section className="panel view-panel">
+	            <div className="panel-head">
+	              <div>
+	                <p className="eyebrow">AI Model Configuration</p>
+	                <h2>AI模型配置</h2>
+	              </div>
+	              <button className="secondary-button" onClick={() => void loadAIProviders()} type="button"><RefreshCw size={16} />刷新</button>
+	            </div>
+	            <RequestStateView compact state={aiProviderState} onRetry={() => loadAIProviders()} />
+	            <div className="ai-provider-card">
+	              <div><span>当前模型配置</span><strong>{aiProviderConfig.displayName || aiProviderConfig.name || "未配置"}</strong></div>
+	              <div><span>模型</span><strong>{aiProviderConfig.model || "未配置"}</strong></div>
+	              <div><span>API Key</span><strong>{aiProviderConfig.apiKeyProvided ? "已配置" : "未配置"}</strong></div>
+	              <div><span>状态</span><strong>{aiProviderConfig.configured ? "可用于 AI 生成" : "缺少配置"}</strong></div>
+	            </div>
+	            <div className="ai-provider-layout">
+	              <section className="template-source-panel">
+	                <div className="template-source-head">
+	                  <h3>选择厂商模板</h3>
+	                  <span>{defaultAIProviderChannels.length} 个模板</span>
+	                </div>
+	                <div className="source-list">
+	                  {defaultAIProviderChannels.map((channel) => (
+	                    <button
+	                      className={aiProviderForm.name === channel.name ? "source-card active" : "source-card"}
+	                      key={channel.name}
+	                      onClick={() => editAIProvider(channel)}
+	                      type="button"
+	                    >
+	                      <strong>{channel.displayName || channel.name}</strong>
+	                      <span>{channel.model || "未设置模型"} · {channel.timeoutSeconds ?? 30}s</span>
+	                      <em>{channel.configured ? "已配置 Key" : "待配置 Key"}</em>
+	                    </button>
+	                  ))}
+	                </div>
+	              </section>
+	              <section className="answer-sheet-basics-panel">
+	                <div className="template-source-head">
+	                  <h3>模型参数</h3>
+	                  <span>保存后立即生效</span>
+	                </div>
+	                <div className="provider-form-grid">
+	                  <label>AI厂商<input value={aiProviderForm.vendorName} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, vendorName: event.target.value }))} /></label>
+	                  <label>自定义名称<input value={aiProviderForm.customName} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, customName: event.target.value, displayName: event.target.value }))} placeholder="例如：OpenAI 主账号、OpenAI 备用 Key" /></label>
+	                  <label>配置标识<input readOnly value={aiModelConfigName(aiProviderForm.vendorName || aiProviderForm.name, aiProviderForm.customName || aiProviderForm.displayName, aiProviderForm.name)} /></label>
+	                  <label>Base URL<input value={aiProviderForm.baseUrl} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, baseUrl: event.target.value }))} /></label>
+	                  <label>模型<input value={aiProviderForm.model} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, model: event.target.value }))} /></label>
+	                  <label>API Key<input autoComplete="off" placeholder={aiProviderConfig.apiKeyProvided ? "留空则沿用已保存 Key" : "请输入 API Key"} type="password" value={aiProviderForm.apiKey} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, apiKey: event.target.value, keepExistingKey: false }))} /></label>
+	                  <label>超时秒数<input min="1" type="number" value={aiProviderForm.timeoutSeconds} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, timeoutSeconds: Number(event.target.value) || 30 }))} /></label>
+	                  <label>回调密钥<input autoComplete="off" placeholder="可选" type="password" value={aiProviderForm.callbackSecret} onChange={(event: { target: { value: string } }) => setAiProviderForm((current) => ({ ...current, callbackSecret: event.target.value }))} /></label>
+	                </div>
+	                <div className="decision-actions compact">
+	                  <button className="primary-button" onClick={() => void saveAIProvider()} type="button"><Check size={18} />保存/更新并启用</button>
+	                </div>
+	              </section>
+	            </div>
+	          </section>
+	          <section className="panel view-panel">
+	            <div className="panel-head">
+	              <div>
+	                <p className="eyebrow">Configured Models</p>
+	                <h2>已配置模型清单</h2>
+	              </div>
+	              <span className="count-pill">{filteredConfiguredAIProviders.length} / {configuredAIProviders.length} 个配置</span>
+	            </div>
+	            <div className="configured-model-toolbar">
+	              <input
+	                aria-label="搜索已配置模型"
+	                onChange={(event: { target: { value: string } }) => setAiProviderSearch(event.target.value)}
+	                placeholder="搜索自定义名称、配置标识、厂商、模型或 Base URL"
+	                value={aiProviderSearch}
+	              />
+	              <button className="secondary-button" disabled={!aiProviderSearch} onClick={() => setAiProviderSearch("")} type="button">清空</button>
+	            </div>
+	            {configuredAIProviders.length > 0 ? (
+	              filteredConfiguredAIProviders.length > 0 ? (
+	                <div className="configured-model-list">
+	                  {filteredConfiguredAIProviders.map((channel) => (
+	                    <article className={channel.active ? "configured-model-row active" : "configured-model-row"} key={channel.name}>
+	                      <div className="configured-model-main">
+	                        <div>
+	                          <strong>{channel.displayName || channel.name}</strong>
+	                          <em className={`status-pill ${channel.active ? "published" : "draft"}`}>{channel.active ? "当前启用" : "已保存"}</em>
+	                        </div>
+	                        <span>{aiProviderVendorName(channel)} · {channel.model || "未设置模型"} · {channel.timeoutSeconds ?? 30}s</span>
+	                        <code>{channel.baseUrl || "Base URL 未设置"}</code>
+	                        <small>配置标识：{channel.name || "未设置"} · API Key：{channel.apiKeyProvided ? "已配置" : "未配置"}{channel.updatedAt ? ` · 更新于 ${new Date(channel.updatedAt).toLocaleString()}` : ""}</small>
+	                      </div>
+	                      <div className="configured-model-actions">
+	                        <button className="template-chip active" onClick={() => editAIProvider(channel)} type="button">编辑修改</button>
+	                        <button className="template-chip" disabled={channel.active} onClick={() => void activateConfiguredAIProvider(channel)} type="button">设为当前</button>
+	                        <button className="template-chip danger" onClick={() => void deleteAIProvider(channel)} type="button">删除</button>
+	                      </div>
+	                    </article>
+	                  ))}
+	                </div>
+	              ) : (
+	                <RequestStateView compact state={{ status: "empty", message: "没有匹配的模型配置", detail: "请调整搜索关键词。" }} />
+	              )
+	            ) : (
+	              <RequestStateView compact state={{ status: "empty", message: "暂无已保存模型配置", detail: "在上方选择厂商模板，填写自定义名称、API Key、模型参数后保存。" }} />
+	            )}
+	          </section>
+	          </>
+	        ) : null}
+
+	        {activeView === "templateManage" ? (
+          <section className="panel view-panel">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Answer Sheet Management</p>
+                <h2>答题卡管理</h2>
+              </div>
+              <div className="top-actions">
+                <button className="secondary-button" onClick={() => void loadTemplates()} type="button"><RefreshCw size={16} />刷新</button>
+                <button className="primary-button" onClick={() => openTemplateCreate()} type="button"><FileStack size={18} />新建答题卡</button>
+              </div>
+            </div>
+            <RequestStateView compact state={templatesState} onRetry={() => loadTemplates()} />
+            <div className="metrics-grid compact">
+              <article className="metric-card">
+                <span>答题卡总数</span>
+                <strong>{templates.length}</strong>
+                <small>本地库与 API 返回合并展示</small>
+              </article>
+              <article className="metric-card">
+                <span>已发布</span>
+                <strong>{templates.filter((template) => normalizeTemplateStatus(template.status) === "published").length}</strong>
+                <small>可用于答题卡扫描绑定</small>
+              </article>
+              <article className="metric-card">
+                <span>已关联试卷</span>
+                <strong>{templates.filter((template) => Boolean(template.sourceFileUrl)).length}</strong>
+                <small>记录在 source_file_url</small>
+              </article>
+            </div>
+            <TableToolbar
+              batchLabel="批量操作"
+              filterOptions={[
+                { label: "全部答题卡", value: "all" },
+                { label: "草稿", value: "status:draft" },
+                { label: "已发布", value: "status:published" },
+                { label: "停用", value: "status:disabled" },
+                { label: "数学", value: "数学" },
+                { label: "六年级", value: "六年级" }
+              ]}
+              filterValue={templateFilter}
+              onBatchAction={() => runBatchAction("答题卡管理批量操作", selectedTemplateIds.length)}
+              onFilterChange={(value) => {
+                setTemplateFilter(value);
+                setTemplatePage(1);
+              }}
+              onSearchChange={(value) => {
+                setTemplateSearch(value);
+                setTemplatePage(1);
+              }}
+              onSortChange={(value) => {
+                setTemplateSort(value);
+                setTemplatePage(1);
+              }}
+              searchPlaceholder="答题卡名称、试卷来源、年级或学科"
+              searchValue={templateSearch}
+              selectedCount={selectedTemplateIds.length}
+              sortOptions={[
+                { label: "名称升序", value: "name_asc" },
+                { label: "总分高到低", value: "score_desc" },
+                { label: "题数多到少", value: "questions_desc" }
+              ]}
+              sortValue={templateSort}
+              totalCount={filteredTemplates.length}
+            />
+            <div className="template-management-list">
+              {filteredTemplates.length > 0 ? (
+                pagedTemplates.map((template) => {
+                  const status = normalizeTemplateStatus(template.status);
+                  return (
+                    <article className={template.id === selectedTemplateId ? "template-management-row active" : "template-management-row"} key={template.id}>
+                      <input
+                        aria-label={`选择${template.name}`}
+                        checked={selectedTemplateIds.includes(template.id)}
+                        onChange={() => toggleSelected(template.id, selectedTemplateIds, setSelectedTemplateIds)}
+                        type="checkbox"
+                      />
+                      <div className="template-management-main">
+                        <div>
+                          <strong>{template.name}</strong>
+                          <em className={`status-pill ${status}`}>{templateStatusLabels[status]}</em>
+                        </div>
+                        <span>{template.grade} · {template.subject} · V{template.version ?? 1} · {template.questionCount} 题 · {template.totalScore} 分</span>
+                        <span>关联试卷：{sourceNameForTemplate(template)}</span>
+                        <code>{template.sourceFileUrl || "source_file_url 未绑定"}</code>
+                      </div>
+                      <div className="library-actions">
+                        <button className="template-chip active" onClick={() => openTemplateEditor(template)} type="button">查看编辑</button>
+                        <button className="template-chip" onClick={() => copyTemplateFromLibrary(template.id)} type="button">复制</button>
+                        {status === "draft" ? (
+                          <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "published")} type="button">发布</button>
+                        ) : null}
+                        {status === "published" ? (
+                          <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "disabled")} type="button">停用</button>
+                        ) : null}
+                        {status === "disabled" ? (
+                          <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "draft")} type="button">转草稿</button>
+                        ) : null}
+                        {can("template:delete") ? (
+                          <button className="template-chip" onClick={() => deleteTemplateFromLibrary(template.id)} type="button">删除</button>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <RequestStateView compact state={{ status: "empty", message: "暂无答题卡", detail: "先从“生成答题卡”创建或导入试卷生成答题卡。" }} />
+              )}
+            </div>
+            <TablePagination page={templatePage} total={filteredTemplates.length} onPageChange={setTemplatePage} />
+          </section>
+        ) : null}
+
+        {!isPortalRole && activeView !== "templates" && activeView !== "templateManage" && activeView !== "papers" && activeView !== "organization" && activeView !== "systemConfig" && activeView !== "questionBank" && activeView !== "paperFlow" && activeView !== "aiTasks" && activeView !== "aiProviders" ? (
           <>
             <RequestStateView state={dashboardState} onRetry={() => loadDashboard()} compact />
             {dashboard.metrics.length > 0 ? (
@@ -4275,6 +5715,17 @@ function App() {
                   {scanUploadedFiles.map((file) => (
                     <span key={file.key}>{file.fileName} · {file.key}</span>
                   ))}
+                </div>
+              ) : null}
+              {lastImportedPaperSource ? (
+                <div className="scan-next-step">
+                  <div>
+                    <strong>已加入试卷来源</strong>
+                    <span>{lastImportedPaperSource.title} · {lastImportedPaperSource.className} · {lastImportedPaperSource.pages} 页</span>
+                  </div>
+                  <button className="primary-button" onClick={() => openTemplateCreate(lastImportedPaperSource)} type="button">
+                    <FileStack size={18} />生成答题卡
+                  </button>
                 </div>
               ) : null}
               <div className="top-actions">
@@ -4750,7 +6201,7 @@ function App() {
                       </div>
                     ))}
                   </div>
-                  <div className="template-side">
+	              <div className="template-side template-side-readonly">
                     <h3>{selectedTemplate?.name ?? "试卷答题卡"}</h3>
                     <div className="template-selector">
                       {templates.map((template) => (
@@ -4820,15 +6271,27 @@ function App() {
         {activeView === "templates" ? (
           <section className="grading-panel">
             <div className="grading-head">
-              <div>
-                <p className="eyebrow">Answer Sheet Generator</p>
-                <h2>{canvasTitle}</h2>
-                <span>{selectedPaperSource?.source ?? "未选择来源"} · {canvasSize.label} · {canvasSize.width} x {canvasSize.height} · 缩放 {Math.round(canvasZoom * 100)}%</span>
-              </div>
+	              <div>
+	                <p className="eyebrow">Answer Sheet Generator</p>
+	                <h2>通过试卷生成答题卡</h2>
+	                <span>{selectedPaperSource ? `当前试卷：${selectedPaperSource.title}` : "未选择试卷"} · {canvasSize.label} · {canvasSize.width} x {canvasSize.height} · 缩放 {Math.round(canvasZoom * 100)}%</span>
+	              </div>
               {can("template:ai") ? (
-                <button className="secondary-button" onClick={() => void generateTemplateAISuggestions()} type="button">
-                  <Sparkles size={18} />AI 生成答题卡
-                </button>
+                <div className="answer-sheet-ai-actions">
+                  <label>
+                    AI模型
+                    <select value={selectedAIProviderName} onChange={(event: { target: { value: string } }) => setSelectedAIProviderName(event.target.value)}>
+                      {aiProviderChannels.map((channel) => (
+                        <option key={channel.name} value={channel.name}>
+                          {(channel.displayName || channel.name || "未命名模型配置") + (channel.model ? ` · ${channel.model}` : "")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button className="secondary-button" disabled={!canGenerateAnswerSheet} onClick={() => void generateTemplateAISuggestions()} type="button">
+                    <Sparkles size={18} />AI 生成答题卡
+                  </button>
+                </div>
               ) : null}
             </div>
             <RequestStateView state={templatesState} onRetry={() => loadTemplates()} compact />
@@ -4853,55 +6316,81 @@ function App() {
                 ) : null}
               </div>
             ) : null}
+            <div className="answer-sheet-config-panel answer-sheet-readonly-panel">
+	              <section className="answer-sheet-basics-panel">
+	                <div className="template-source-head">
+	                  <h3>生成方式与必备参数</h3>
+	                  <span>AI 自动生成</span>
+	                </div>
+	                <div className="answer-sheet-basic-grid">
+	                  <label>学科<input value={answerSheetBasics.subject} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("subject", event.target.value)} /></label>
+	                  <label>年级<input value={answerSheetBasics.gradeName} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("gradeName", event.target.value)} /></label>
+	                  <label>班级<input value={answerSheetBasics.className} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("className", event.target.value)} /></label>
+	                  <label>满分<input min="1" type="number" value={answerSheetBasics.targetScore} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("targetScore", Number(event.target.value) || 0)} /></label>
+                  <label>考试时长<input min="1" type="number" value={answerSheetBasics.durationMinutes} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("durationMinutes", Number(event.target.value) || 0)} /></label>
+                  <label>姓名字段<input value={answerSheetBasics.nameField} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("nameField", event.target.value)} /></label>
+                  <label>考号字段<input value={answerSheetBasics.examNoField} onChange={(event: { target: { value: string } }) => updateAnswerSheetBasic("examNoField", event.target.value)} /></label>
+                </div>
+              </section>
+              {false ? (
+                <section className="manual-sheet-panel">
+	                  <div className="template-source-head">
+	                    <h3>大题配置</h3>
+	                    <span>{manualGroups.length} 个大题组</span>
+	                  </div>
+	                  <div className="manual-group-header" aria-hidden="true">
+	                    <span>题号</span>
+	                    <span>题型</span>
+	                    <span>数量</span>
+	                    <span>每题分值</span>
+	                    <span>起始小题号</span>
+	                    <span>操作</span>
+	                  </div>
+	                  <div className="manual-group-list">
+                    {manualGroups.map((group) => (
+                      <div className="manual-group-row" key={group.id}>
+                        <input aria-label="大题题号" value={group.title} onChange={(event: { target: { value: string } }) => updateManualGroup(group.id, { title: event.target.value })} />
+                        <select value={group.type} onChange={(event: { target: { value: string } }) => updateManualGroup(group.id, { type: event.target.value as TemplateTool })}>
+                          <option value="choice">选择题</option>
+                          <option value="judge">判断题</option>
+                          <option value="fill_blank">填空题</option>
+                          <option value="calculation">计算题</option>
+                          <option value="subjective">问答题</option>
+                          <option value="essay">作文</option>
+                        </select>
+                        <input aria-label="数量" min="1" type="number" value={group.count} onChange={(event: { target: { value: string } }) => updateManualGroup(group.id, { count: Number(event.target.value) || 1 })} />
+                        <input aria-label="每题分值" min="0" type="number" value={group.score} onChange={(event: { target: { value: string } }) => updateManualGroup(group.id, { score: Number(event.target.value) || 0 })} />
+                        <input aria-label="起始小题号" min="1" type="number" value={group.startNo} onChange={(event: { target: { value: string } }) => updateManualGroup(group.id, { startNo: Number(event.target.value) || 1 })} />
+                        <button className="icon-button" onClick={() => removeManualGroup(group.id)} title="删除大题" type="button">×</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="decision-actions compact">
+                    <button className="secondary-button" onClick={addManualGroup} type="button">新增大题</button>
+                    <button className="primary-button" onClick={generateManualAnswerSheet} type="button"><FileStack size={18} />生成答题卡结构</button>
+                  </div>
+                </section>
+              ) : null}
+	              <section className="answer-sheet-save-note">
+	                <strong>保存与试卷关联</strong>
+	                <span>保存成功后写入 API 答题卡库，数据库表为 paper_templates，来源文件地址记录在 source_file_url，用于关联上传试卷。</span>
+	                <span>当前来源地址：{paperSourceFileAddress(selectedPaperSource) || "未绑定试卷文件"}</span>
+	              </section>
+	            </div>
             <div className="template-editor">
-              <div className="canvas-shell">
-                <div className="canvas-toolbar">
-                  <div className="tool-group">
-                    {Object.entries(templateTools).map(([key, tool]) => (
-                      <button
-                        className={activeTool === key ? "tool-button active" : "tool-button"}
-                        key={key}
-                        onClick={() => setActiveTool(key as TemplateTool)}
-                        style={{ "--tool-color": tool.color } as Record<string, string>}
-                        type="button"
-                      >
-                        <span />
-                        {tool.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="tool-group">
-                    {canvasPresets.map((preset) => (
-                      <button
-                        className={canvasSize.label === preset.label ? "template-chip active" : "template-chip"}
-                        key={preset.label}
-                        onClick={() => {
-                          setCanvasSize(preset);
-                          setNotice(`已导入${preset.label}答题卡`);
-                        }}
-                        type="button"
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="zoom-controls">
-                    <button className="icon-button" onClick={() => setCanvasZoom((value) => Math.max(0.6, Number((value - 0.1).toFixed(1))))} title="缩小" type="button">-</button>
-                    <span>{Math.round(canvasZoom * 100)}%</span>
-                    <button className="icon-button" onClick={() => setCanvasZoom((value) => Math.min(1.6, Number((value + 0.1).toFixed(1))))} title="放大" type="button">+</button>
+	              <div className="canvas-shell">
+	                <div className="canvas-toolbar">
+	                  <div className="tool-group preview-title"><strong>答题卡预览</strong></div>
+	                  <div className="tool-group">
+	                    <button className="icon-button" onClick={() => setCanvasZoom((value) => Math.max(0.6, Number((value - 0.1).toFixed(1))))} title="缩小" type="button">-</button>
+	                    <span>{Math.round(canvasZoom * 100)}%</span>
+	                    <button className="icon-button" onClick={() => setCanvasZoom((value) => Math.min(1.6, Number((value + 0.1).toFixed(1))))} title="放大" type="button">+</button>
                   </div>
                 </div>
                 <div className="canvas-viewport">
                   <div
-                    className="editable-paper-canvas"
-	                    onClick={(event: { clientX: number; clientY: number; target: EventTarget; currentTarget: EventTarget }) => {
-	                      if (can("template:edit") && canEditSelectedTemplate) {
-	                        void addRegionAt(event);
-	                      }
-	                    }}
-	                    onPointerMove={moveRegionDrag}
-	                    onPointerUp={() => void finishRegionDrag()}
-                    ref={setCanvasElement}
+	                    className="editable-paper-canvas answer-sheet-preview-canvas"
+	                    ref={setCanvasElement}
                     style={{
                       height: `${canvasSize.height * canvasZoom}px`,
                       width: `${canvasSize.width * canvasZoom}px`
@@ -4909,40 +6398,42 @@ function App() {
                   >
                     <div className="blank-paper-scan">
                       <div className="paper-title-line">{canvasTitle}</div>
+                      <div className="answer-sheet-page-head">
+                        <strong>{canvasTitle}</strong>
+                        <span>{answerSheetBasics.subject} · {answerSheetBasics.durationMinutes} 分钟 · 满分 {answerSheetBasics.targetScore}</span>
+	                        <div>
+	                          <em>{answerSheetBasics.nameField}：________</em>
+	                          <em>{answerSheetBasics.examNoField}：________</em>
+	                          <em>年级：________</em>
+	                          <em>班级：________</em>
+	                        </div>
+                      </div>
+                      <i className="sheet-anchor tl" />
+                      <i className="sheet-anchor tr" />
+                      <i className="sheet-anchor bl" />
+                      <i className="sheet-anchor br" />
                     </div>
                     {canvasRegions.map((item) => (
                       <button
-                        className={item.id === selectedRegionId ? "canvas-region active" : "canvas-region"}
-                        key={item.id}
-                        onClick={(event: { stopPropagation: () => void }) => event.stopPropagation()}
-                        onPointerDown={(event: {
-                          clientX: number;
-                          clientY: number;
-                          stopPropagation: () => void;
-                          currentTarget: { setPointerCapture?: (pointerId: number) => void };
-                          pointerId: number;
-                        }) => startRegionDrag(event, item, "move")}
-                        style={canvasRegionStyle(item)}
+	                        className="canvas-region preview-only"
+	                        key={item.id}
+	                        onClick={(event: { stopPropagation: () => void }) => event.stopPropagation()}
+	                        style={canvasRegionStyle(item)}
                         type="button"
                       >
                         <span>{item.no} · {item.label}</span>
-                        <i
-                          aria-label="调整大小"
-                          onPointerDown={(event: {
-                            clientX: number;
-                            clientY: number;
-                            stopPropagation: () => void;
-                            currentTarget: { setPointerCapture?: (pointerId: number) => void };
-                            pointerId: number;
-                          }) => startRegionDrag(event, item, "resize")}
-                        />
-                      </button>
+                        {objectiveAnswerOptions[item.type] ? (
+                          <em className="bubble-row">{objectiveAnswerOptions[item.type]?.join("  ")}</em>
+                        ) : item.type === "essay" ? (
+                          <em className="bubble-row">作文格 / 跨页书写区</em>
+                        ) : null}
+	                      </button>
                     ))}
                   </div>
                 </div>
               </div>
               <div className="template-side">
-                <section className="template-source-panel">
+                <section className="template-source-panel answer-sheet-source-panel">
                   <div className="template-source-head">
                     <h3>试卷来源</h3>
                     <span>{selectedPaperSource?.title ?? "未选择试卷"}</span>
@@ -4968,267 +6459,52 @@ function App() {
                       从库存选择
                     </button>
                   </div>
-                  {templateSourceMode === "library" ? (
-                    <div className="source-list">
+	                  {templateSourceMode === "library" ? (
+	                    <div className="source-list">
                       {paperSources.map((source) => (
                         <button
                           className={source.id === selectedPaperSourceId ? "source-card active" : "source-card"}
                           key={source.id}
                           onClick={() => applyPaperSource(source)}
                           type="button"
-                        >
-                          <strong>{source.title}</strong>
-                          <span>{source.className} · {source.pages} 页 · {source.size.label}</span>
-                          <em>{source.importedAt}</em>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </section>
-                <h3>答题卡库</h3>
-                <TableToolbar
-                  batchLabel="批量发布"
-	                  filterOptions={[
-	                    { label: "全部答题卡", value: "all" },
-	                    { label: "草稿", value: "status:draft" },
-	                    { label: "已发布", value: "status:published" },
-	                    { label: "停用", value: "status:disabled" },
-	                    { label: "数学", value: "数学" },
-	                    { label: "六年级", value: "六年级" }
-	                  ]}
-                  filterValue={templateFilter}
-                  onBatchAction={() => runBatchAction("答题卡库批量操作", selectedTemplateIds.length)}
-                  onFilterChange={(value) => {
-                    setTemplateFilter(value);
-                    setTemplatePage(1);
-                  }}
-                  onSearchChange={(value) => {
-                    setTemplateSearch(value);
-                    setTemplatePage(1);
-                  }}
-                  onSortChange={(value) => {
-                    setTemplateSort(value);
-                    setTemplatePage(1);
-                  }}
-                  searchPlaceholder="答题卡名称、年级或学科"
-                  searchValue={templateSearch}
-                  selectedCount={selectedTemplateIds.length}
-                  sortOptions={[
-                    { label: "名称升序", value: "name_asc" },
-                    { label: "总分高到低", value: "score_desc" },
-                    { label: "题数多到少", value: "questions_desc" }
-                  ]}
-                  sortValue={templateSort}
-                  totalCount={filteredTemplates.length}
-                />
-                <div className="template-library-list">
-                  {filteredTemplates.length > 0 ? (
-                    pagedTemplates.map((template) => (
-                      <div className={template.id === selectedTemplateId ? "library-card table-row active" : "library-card table-row"} key={template.id}>
-                        <input
-                          aria-label={`选择${template.name}`}
-                          checked={selectedTemplateIds.includes(template.id)}
-                          onChange={() => toggleSelected(template.id, selectedTemplateIds, setSelectedTemplateIds)}
-                          type="checkbox"
-                        />
-	                        <button className="library-card-main" onClick={() => applyTemplateFromLibrary(template)} type="button">
-	                          <strong>{template.name}</strong>
-	                          <span>{template.grade} · {template.subject} · V{template.version ?? 1} · {template.questionCount} 题 · {template.totalScore} 分</span>
-	                          <em className={`status-pill ${normalizeTemplateStatus(template.status)}`}>{templateStatusLabels[normalizeTemplateStatus(template.status)]}</em>
+	                        >
+	                          <strong>{source.title}</strong>
+	                          <span>{source.className} · {source.pages} 页 · {source.size.label}</span>
+	                          <em>{source.source} · {source.importedAt}</em>
+	                          {source.fileName ? <em>{source.fileName}</em> : null}
 	                        </button>
-	                        <div className="library-actions">
-	                          <button className="template-chip active" onClick={() => applyTemplateFromLibrary(template)} type="button">引用</button>
-	                          <button className="template-chip" onClick={() => copyTemplateFromLibrary(template.id)} type="button">复制新版本</button>
-	                          {normalizeTemplateStatus(template.status) === "draft" ? (
-	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "published")} type="button">发布</button>
-	                          ) : null}
-	                          {normalizeTemplateStatus(template.status) === "published" ? (
-	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "disabled")} type="button">停用</button>
-	                          ) : null}
-	                          {normalizeTemplateStatus(template.status) === "disabled" ? (
-	                            <button className="template-chip" onClick={() => updateTemplateStatus(template.id, "draft")} type="button">转草稿</button>
-	                          ) : null}
-	                          {can("template:delete") ? (
-	                            <button className="template-chip" onClick={() => deleteTemplateFromLibrary(template.id)} type="button">删除</button>
-	                          ) : null}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <RequestStateView
-                      compact
-                      onRetry={() => loadTemplates()}
-                      state={{ status: "empty", message: "没有符合条件的答题卡", detail: "调整搜索或筛选条件后重试。" }}
-                    />
-                  )}
-                </div>
-                <TablePagination page={templatePage} total={filteredTemplates.length} onPageChange={setTemplatePage} />
-                <h3>答题卡设置</h3>
-                <div className="region-style-editor">
-                  <label>
-                    答题卡名称
-                    <input
-                      onChange={(event: { target: { value: string } }) => setCanvasTitle(event.target.value)}
-                      value={canvasTitle}
-                    />
-                  </label>
-                </div>
-	                <p>答题卡库总数：{templates.length} 个</p>
-	                <p>当前状态：{templateStatusLabels[selectedTemplateStatus]} · V{selectedTemplate?.version ?? 1}</p>
-	                <p>来源文件：{selectedTemplate?.sourceFileUrl || "未绑定"}</p>
-	                <p>区域数量：{canvasRegions.length} 个</p>
-	                <p>当前题区：{selectedCanvasRegion ? `${selectedCanvasRegion.no} · ${selectedCanvasRegion.label}` : "未选择"}</p>
-                <div className="region-style-editor">
-                  <label>
-                    边框颜色
-                    <input
-                      disabled={!selectedCanvasRegion}
-                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, color: event.target.value }))}
-                      type="color"
-                      value={selectedCanvasRegion?.color ?? "#0d7c66"}
-                    />
-                  </label>
-                  <label>
-                    线型
-                    <select
-                      disabled={!selectedCanvasRegion}
-                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, borderStyle: event.target.value as CanvasRegion["borderStyle"] }))}
-                      value={selectedCanvasRegion?.borderStyle ?? "solid"}
-                    >
-                      <option value="solid">实线</option>
-                      <option value="dashed">虚线</option>
-                      <option value="dotted">点线</option>
-	                    </select>
-	                  </label>
-	                </div>
-	                <h3>题目结构</h3>
-	                <div className="question-config-editor">
-	                  <label>
-	                    题号
-	                    <input
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, no: event.target.value }))}
-	                      value={selectedCanvasRegion?.no ?? ""}
-	                    />
-	                  </label>
-	                  <label>
-	                    题型
-	                    <select
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      onChange={(event: { target: { value: string } }) => {
-	                        const nextType = event.target.value as TemplateTool;
-	                        const nextTool = templateTools[nextType];
-	                        updateSelectedRegion((item) => ({
-	                          ...item,
-	                          type: nextType,
-	                          label: nextTool.label,
-	                          color: nextTool.color,
-	                          score: item.score || (nextType === "subjective" ? 10 : 2)
-	                        }));
-	                      }}
-	                      value={selectedCanvasRegion?.type ?? "subjective"}
-	                    >
-	                      <option value="choice">选择题</option>
-	                      <option value="judge">判断题</option>
-	                      <option value="objective">客观题</option>
-	                      <option value="subjective">主观题</option>
-	                    </select>
-	                  </label>
-	                  <label>
-	                    分值
-	                    <input
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      min="0"
-	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, score: Number(event.target.value) || 0 }))}
-	                      type="number"
-	                      value={selectedCanvasRegion?.score ?? 0}
-	                    />
-	                  </label>
-	                  <label>
-	                    标准答案
-	                    <textarea
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, standardAnswer: event.target.value }))}
-	                      rows={3}
-	                      value={selectedCanvasRegion?.standardAnswer ?? ""}
-	                    />
-	                  </label>
-	                  {selectedCanvasRegion && selectedCanvasRegion.type !== "subjective" ? (
-	                    <div className="objective-config-panel">
-	                      <div>
-	                        <strong>客观题答案配置</strong>
-	                        <span>{selectedCanvasRegion.score} 分 · {selectedCanvasRegion.standardAnswer || "未配置答案"}</span>
-	                      </div>
-	                      <div className="answer-chip-list">
-	                        {objectiveAnswerOptions[selectedCanvasRegion.type].map((answer) => (
-	                          <button
-	                            className={selectedCanvasRegion.standardAnswer === answer ? "template-chip active" : "template-chip"}
-	                            disabled={!canEditSelectedTemplate}
-	                            key={`${selectedCanvasRegion.id}-${answer}`}
-	                            onClick={() => updateSelectedRegion((item) => ({ ...item, standardAnswer: answer, scoringRules: item.scoringRules.length > 0 ? item.scoringRules : ["答案一致得满分", "缺答或识别异常进入复核"] }))}
-	                            type="button"
-	                          >
-	                            {answer}
-	                          </button>
-	                        ))}
-	                      </div>
+	                      ))}
+                        {paperSources.length === 0 ? (
+                          <RequestStateView compact state={{ status: "empty", message: "暂无试卷来源", detail: "先到扫描导入上传试卷 PDF。" }} />
+                        ) : null}
 	                    </div>
 	                  ) : null}
-	                  <label>
-	                    采分点
-	                    <textarea
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, scoringRules: event.target.value.split("\n").map((line) => line.trim()).filter(Boolean) }))}
-	                      rows={3}
-	                      value={(selectedCanvasRegion?.scoringRules ?? []).join("\n")}
-	                    />
-	                  </label>
-	                  <label>
-	                    知识点
-	                    <textarea
-	                      disabled={!selectedCanvasRegion || !canEditSelectedTemplate}
-	                      onChange={(event: { target: { value: string } }) => updateSelectedRegion((item) => ({ ...item, knowledge: event.target.value.split(/[，,\n]/).map((line) => line.trim()).filter(Boolean) }))}
-	                      rows={2}
-	                      value={(selectedCanvasRegion?.knowledge ?? []).join("，")}
-	                    />
-	                  </label>
-	                  {!canEditSelectedTemplate ? (
-	                    <div className="permission-note">当前答题卡已发布或停用，请复制新版本后编辑题目结构。</div>
-	                  ) : null}
-	                </div>
-	                <h3>草稿箱</h3>
-                <div className="draft-list">
-                  {templateDrafts.length > 0 ? (
-                    templateDrafts.map((draft) => (
-                      <button className="source-card" key={draft.id} onClick={() => loadTemplateDraft(draft)} type="button">
-                        <strong>{draft.title}</strong>
-                        <span>{draft.sourceTitle} · {draft.regions.length} 个区域</span>
-                        <em>{draft.updatedAt}</em>
+                  <div className="answer-sheet-prerequisites">
+                    <span className={selectedPaperSource ? "done" : ""}>1 选中试卷</span>
+                    <span className={selectedAIProvider ? "done" : ""}>2 选择 AI 模型</span>
+                    <span className={canGenerateAnswerSheet ? "done" : ""}>3 生成答题卡</span>
+                  </div>
+                  <div className="answer-sheet-result-actions">
+                    <div className="template-source-head">
+                      <h3>答题卡结果处理</h3>
+                      <span>{canvasRegions.length} 个题区</span>
+                    </div>
+                    <div className="result-action-grid">
+                      <button className="primary-button" disabled={aiSuggestedRegions.length === 0 || !canEditSelectedTemplate} onClick={() => void confirmTemplateAISuggestions()} type="button">
+                        <Check size={18} />保存生成的答题卡
                       </button>
-                    ))
-                  ) : (
-                    <RequestStateView
-                      compact
-                      state={{ status: "empty", message: "暂无草稿", detail: "保存草稿后可从这里恢复编辑。" }}
-                    />
-                  )}
-                </div>
-                <div className="decision-actions">
-                  {can("template:edit") ? (
-                    <>
-	                      <button className="secondary-button" onClick={saveCurrentAsTemplate} type="button"><FileStack size={18} />保存为答题卡</button>
-		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={updateCurrentTemplate} type="button"><FileStack size={18} />更新答题卡</button>
-		                      <button className="secondary-button" disabled={!canEditSelectedTemplate} onClick={saveCurrentRegions} type="button"><Check size={18} />保存题区</button>
-	                      <button className="primary-button" onClick={saveTemplateDraft} type="button"><Check size={18} />保存草稿</button>
-		                      <button className="ghost-button" disabled={!canEditSelectedTemplate} onClick={() => void deleteSelectedRegion()} type="button">删除区域</button>
-                    </>
-                  ) : (
-                    <div className="permission-note">当前角色仅可查看答题卡，不能编辑或保存。</div>
-                  )}
-                  {can("grading:review") ? (
-                    <button className="ghost-button" onClick={openReviewQueue} type="button">进入阅卷</button>
-                  ) : null}
-                </div>
+                      <button className="secondary-button" disabled={canvasRegions.length === 0} onClick={saveTemplateDraft} type="button">
+                        <FileStack size={18} />存草稿
+                      </button>
+                      <button className="ghost-button" disabled={canvasRegions.length === 0} onClick={clearGeneratedAnswerSheetResult} type="button">
+                        删除
+                      </button>
+                      <button className="secondary-button" disabled={!canGenerateAnswerSheet} onClick={() => void generateTemplateAISuggestions()} type="button">
+                        <Sparkles size={18} />重新生成
+                      </button>
+                    </div>
+                  </div>
+                </section>
               </div>
             </div>
           </section>

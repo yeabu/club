@@ -30,9 +30,14 @@ obs:
   region: ""
 
 aiProvider:
-  # 通用第三方 AI HTTP 任务入口。可配置为厂商提供的完整任务接收 URL。
-  name: generic-http
+  # OpenAI-compatible 三方 AI 接口，用于“AI 生成答题卡”等同步生成能力。
+  # 示例：
+  #   DeepSeek: https://api.deepseek.com
+  #   通义千问 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   OpenAI: https://api.openai.com/v1
+  name: deepseek
   baseUrl: ""
   apiKey: ""
+  model: ""
   timeoutSeconds: 30
   callbackSecret: ""

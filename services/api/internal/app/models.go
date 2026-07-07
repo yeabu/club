@@ -51,11 +51,41 @@ type ScanFile struct {
 	MatchMethod   string `json:"matchMethod,omitempty"`
 }
 
+type ScanFileStatusRequest struct {
+	FileKey       string `json:"fileKey"`
+	Status        string `json:"status"`
+	FailureReason string `json:"failureReason"`
+	StudentID     string `json:"studentId"`
+	StudentName   string `json:"studentName"`
+	MatchStatus   string `json:"matchStatus"`
+}
+
+type ScanException struct {
+	TaskID      string `json:"taskId"`
+	Title       string `json:"title"`
+	ClassName   string `json:"className"`
+	FileKey     string `json:"fileKey,omitempty"`
+	FileName    string `json:"fileName,omitempty"`
+	Page        int    `json:"page,omitempty"`
+	Status      string `json:"status"`
+	Reason      string `json:"reason"`
+	StudentID   string `json:"studentId,omitempty"`
+	StudentName string `json:"studentName,omitempty"`
+	MatchStatus string `json:"matchStatus,omitempty"`
+	QueueStatus string `json:"queueStatus,omitempty"`
+}
+
+type ScanExceptionListResponse struct {
+	Items []ScanException `json:"items"`
+}
+
 type ScanUploadResponse struct {
 	Files []ScanFile `json:"files"`
 }
 
 type ScanTaskRequest struct {
+	AssignmentID    string     `json:"assignmentId"`
+	ExamID          string     `json:"examId"`
 	ScanType        string     `json:"scanType"`
 	Title           string     `json:"title"`
 	ClassName       string     `json:"className"`
@@ -151,6 +181,9 @@ func normalizeScanType(value string) string {
 type TemplateAISuggestionRequest struct {
 	SourceFileURL string `json:"sourceFileUrl"`
 	PaperName     string `json:"paperName"`
+	Subject       string `json:"subject,omitempty"`
+	Grade         string `json:"grade,omitempty"`
+	TargetScore   int    `json:"targetScore,omitempty"`
 }
 
 type TemplateAISuggestionResponse struct {
@@ -160,6 +193,102 @@ type TemplateAISuggestionResponse struct {
 	SuggestedQuestions []QuestionTemplate `json:"suggestedQuestions"`
 	ReviewRequired     bool               `json:"reviewRequired"`
 	Source             string             `json:"source"`
+	Provider           string             `json:"provider,omitempty"`
+	ProviderError      string             `json:"providerError,omitempty"`
+}
+
+type PaperManagementItem struct {
+	ID              string         `json:"id"`
+	Title           string         `json:"title"`
+	ClassName       string         `json:"className"`
+	Pages           int            `json:"pages"`
+	Status          string         `json:"status"`
+	Progress        int            `json:"progress"`
+	SourceFileURL   string         `json:"sourceFileUrl"`
+	SourceFileKey   string         `json:"sourceFileKey"`
+	FileName        string         `json:"fileName"`
+	ImportedAt      string         `json:"importedAt"`
+	Template        *PaperTemplate `json:"template,omitempty"`
+	TemplateID      string         `json:"templateId,omitempty"`
+	TemplateVersion int            `json:"templateVersion,omitempty"`
+}
+
+type PaperManagementResponse struct {
+	Items []PaperManagementItem `json:"items"`
+}
+
+type PaperDeleteResponse struct {
+	Status      string   `json:"status"`
+	DeletedID   string   `json:"deletedId"`
+	DeletedKeys []string `json:"deletedKeys"`
+}
+
+type AIProviderSetting struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	DisplayName            string `json:"displayName"`
+	BaseURL                string `json:"baseUrl"`
+	Model                  string `json:"model"`
+	TimeoutSeconds         int    `json:"timeoutSeconds"`
+	APIKey                 string `json:"-"`
+	APIKeyProvided         bool   `json:"apiKeyProvided"`
+	CallbackSecret         string `json:"-"`
+	CallbackSecretProvided bool   `json:"callbackSecretProvided"`
+	Active                 bool   `json:"active"`
+	Configured             bool   `json:"configured"`
+	UpdatedAt              string `json:"updatedAt,omitempty"`
+}
+
+type AIProviderSettingRequest struct {
+	Name            string `json:"name"`
+	DisplayName     string `json:"displayName"`
+	BaseURL         string `json:"baseUrl"`
+	Model           string `json:"model"`
+	APIKey          string `json:"apiKey"`
+	TimeoutSeconds  int    `json:"timeoutSeconds"`
+	CallbackSecret  string `json:"callbackSecret"`
+	KeepExistingKey bool   `json:"keepExistingKey"`
+}
+
+type AIProviderSettingsResponse struct {
+	Current  AIProviderSetting   `json:"current"`
+	Channels []AIProviderSetting `json:"channels"`
+}
+
+type SystemConfig struct {
+	Storage SystemStorageConfig `json:"storage"`
+	Roles   []SystemRoleConfig  `json:"roles"`
+	VIP     []SystemVIPConfig   `json:"vip"`
+}
+
+type SystemStorageConfig struct {
+	Driver             string `json:"driver"`
+	Endpoint           string `json:"endpoint"`
+	Bucket             string `json:"bucket"`
+	Region             string `json:"region"`
+	PublicBaseURL      string `json:"publicBaseUrl"`
+	MaxUploadMB        int    `json:"maxUploadMb"`
+	AccessKeyProvided  bool   `json:"accessKeyProvided"`
+	SecretKeyProvided  bool   `json:"secretKeyProvided"`
+	AccessKey          string `json:"accessKey,omitempty"`
+	SecretKey          string `json:"secretKey,omitempty"`
+	KeepExistingSecret bool   `json:"keepExistingSecret,omitempty"`
+}
+
+type SystemRoleConfig struct {
+	Key         string   `json:"key"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+	Enabled     bool     `json:"enabled"`
+}
+
+type SystemVIPConfig struct {
+	Level          string `json:"level"`
+	Name           string `json:"name"`
+	TokenQuota     int    `json:"tokenQuota"`
+	StorageQuotaGB int    `json:"storageQuotaGb"`
+	Enabled        bool   `json:"enabled"`
 }
 
 type ReviewItem struct {
@@ -234,6 +363,23 @@ type RepracticeTaskResponse struct {
 	TaskID      string   `json:"taskId"`
 	LinkedCount int      `json:"linkedCount"`
 	Knowledge   []string `json:"knowledge"`
+}
+
+type RepracticeSubmissionRequest struct {
+	StudentID string                       `json:"studentId"`
+	Answers   []RepracticeSubmissionAnswer `json:"answers"`
+}
+
+type RepracticeSubmissionAnswer struct {
+	WrongQuestionID int64  `json:"wrongQuestionId"`
+	Answer          string `json:"answer"`
+	Status          string `json:"status"`
+}
+
+type RepracticeSubmissionResponse struct {
+	Status    string `json:"status"`
+	TaskID    string `json:"taskId"`
+	Submitted int    `json:"submitted"`
 }
 
 type KnowledgeMastery struct {
@@ -355,6 +501,35 @@ type TemplateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+type TemplateValidationIssue struct {
+	Code       string `json:"code"`
+	Severity   string `json:"severity"`
+	Message    string `json:"message"`
+	QuestionID string `json:"questionId,omitempty"`
+	QuestionNo string `json:"questionNo,omitempty"`
+	Page       int    `json:"page,omitempty"`
+}
+
+type TemplateValidationResponse struct {
+	TemplateID string                    `json:"templateId"`
+	Valid      bool                      `json:"valid"`
+	Issues     []TemplateValidationIssue `json:"issues"`
+}
+
+type TemplateDiffResponse struct {
+	BaseTemplateID   string               `json:"baseTemplateId"`
+	TargetTemplateID string               `json:"targetTemplateId"`
+	AddedQuestions   []QuestionTemplate   `json:"addedQuestions"`
+	RemovedQuestions []QuestionTemplate   `json:"removedQuestions"`
+	ChangedQuestions []TemplateDiffChange `json:"changedQuestions"`
+	Summary          []string             `json:"summary"`
+}
+
+type TemplateDiffChange struct {
+	QuestionNo string   `json:"questionNo"`
+	Fields     []string `json:"fields"`
+}
+
 type PaperTemplate struct {
 	ID            string             `json:"id"`
 	Name          string             `json:"name"`
@@ -445,11 +620,25 @@ type ObjectiveReviewException struct {
 	SuggestedScore float64 `json:"suggestedScore"`
 }
 
+type ObjectiveReviewDecisionRequest struct {
+	Score       float64 `json:"score"`
+	Decision    string  `json:"decision"`
+	TeacherNote string  `json:"teacherNote"`
+	ActorName   string  `json:"actorName"`
+}
+
+type ObjectiveReviewDecisionResponse struct {
+	Status    string                   `json:"status"`
+	Exception ObjectiveReviewException `json:"exception"`
+}
+
 type ScoreGenerationResponse struct {
 	Status    string `json:"status"`
 	ExamID    string `json:"examId,omitempty"`
 	ClassName string `json:"className"`
 	Generated int    `json:"generated"`
+	Blocked   bool   `json:"blocked,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 type QuestionStat struct {
@@ -462,4 +651,77 @@ type StudentRisk struct {
 	StudentName string   `json:"studentName"`
 	Risk        string   `json:"risk"`
 	Weakness    []string `json:"weakness"`
+}
+
+type AuthContext struct {
+	UserID     string   `json:"userId"`
+	SchoolID   string   `json:"schoolId,omitempty"`
+	RoleNames  []string `json:"roleNames"`
+	StudentID  string   `json:"studentId,omitempty"`
+	GuardianID string   `json:"guardianId,omitempty"`
+	TeacherID  string   `json:"teacherId,omitempty"`
+}
+
+type AuthLoginRequest struct {
+	Account  string `json:"account"`
+	Password string `json:"password"`
+}
+
+type AuthLoginResponse struct {
+	Status      string            `json:"status"`
+	User        AuthContext       `json:"user"`
+	AuthHeaders map[string]string `json:"authHeaders"`
+}
+
+type ExamPublishRequest struct {
+	Name          string             `json:"name"`
+	SchoolID      string             `json:"schoolId"`
+	Subject       string             `json:"subject"`
+	Grade         string             `json:"grade"`
+	ClassID       string             `json:"classId"`
+	TeacherID     string             `json:"teacherId"`
+	TemplateID    string             `json:"templateId"`
+	MaxScore      float64            `json:"maxScore"`
+	StartedAt     string             `json:"startedAt"`
+	EndedAt       string             `json:"endedAt"`
+	StudentIDs    []string           `json:"studentIds"`
+	GradingPolicy *AutoGradingPolicy `json:"gradingPolicy,omitempty"`
+}
+
+type ExamRecord struct {
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	SchoolID        string            `json:"schoolId"`
+	Subject         string            `json:"subject"`
+	Grade           string            `json:"grade"`
+	ClassID         string            `json:"classId"`
+	ClassName       string            `json:"className"`
+	TeacherID       string            `json:"teacherId"`
+	TemplateID      string            `json:"templateId"`
+	TemplateVersion int               `json:"templateVersion"`
+	Status          string            `json:"status"`
+	MaxScore        float64           `json:"maxScore"`
+	RosterLocked    bool              `json:"rosterLocked"`
+	Students        []ExamStudent     `json:"students,omitempty"`
+	GradingPolicy   AutoGradingPolicy `json:"gradingPolicy"`
+}
+
+type ExamStudent struct {
+	StudentID string `json:"studentId"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+}
+
+type ExamAttendanceRequest struct {
+	Status string `json:"status"`
+	Note   string `json:"note"`
+}
+
+type AutoGradingPolicy struct {
+	ObjectiveMinConfidence  int     `json:"objectiveMinConfidence"`
+	SubjectiveMinConfidence int     `json:"subjectiveMinConfidence"`
+	SubjectiveMaxScoreShare float64 `json:"subjectiveMaxScoreShare"`
+	SamplingRate            int     `json:"samplingRate"`
+	RequireReason           bool    `json:"requireReason"`
+	AbnormalFallback        bool    `json:"abnormalFallback"`
 }

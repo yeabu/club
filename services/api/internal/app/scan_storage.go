@@ -78,8 +78,27 @@ func saveScanUpload(config Config, header *multipart.FileHeader) (ScanFile, erro
 	datePath := time.Now().Format("20060102")
 	key := filepath.ToSlash(filepath.Join("scan", datePath, fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeFileName(header.Filename))))
 	if config.StorageDriver == "obs" {
-		return saveOBSUpload(config.OBS, file, header, key, contentType)
+		uploaded, err := saveOBSUpload(config.OBS, file, header, key, contentType)
+		if err == nil {
+			return uploaded, nil
+		}
+		if seeker, ok := file.(io.Seeker); ok {
+			if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr == nil {
+				local, localErr := saveLocalScanUpload(file, header, key, contentType)
+				if localErr == nil {
+					local.Status = "本地暂存"
+					local.FailureReason = "OBS 上传失败，已本地暂存：" + err.Error()
+					return local, nil
+				}
+				return ScanFile{}, fmt.Errorf("%w; local fallback failed: %v", err, localErr)
+			}
+		}
+		return ScanFile{}, err
 	}
+	return saveLocalScanUpload(file, header, key, contentType)
+}
+
+func saveLocalScanUpload(file io.Reader, header *multipart.FileHeader, key, contentType string) (ScanFile, error) {
 	targetPath := filepath.Join(localUploadRoot(), filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return ScanFile{}, err
@@ -129,18 +148,66 @@ func saveOBSUpload(config OBSConfig, body io.Reader, header *multipart.FileHeade
 	}
 	objectURL := output.ObjectUrl
 	if objectURL == "" {
-		objectURL = strings.TrimRight(config.Endpoint, "/") + "/" + key
+		objectURL = obsObjectURL(config, key)
 	}
 	return ScanFile{Key: key, FileName: header.Filename, ContentType: contentType, Size: header.Size, URL: objectURL}, nil
 }
 
+func deleteStoredScanFile(config Config, file ScanFile) error {
+	key := strings.TrimSpace(file.Key)
+	if key == "" {
+		return nil
+	}
+	if config.StorageDriver == "obs" && config.OBS.Bucket != "" {
+		if config.OBS.Endpoint == "" || config.OBS.AccessKeyID == "" || config.OBS.SecretAccessKey == "" {
+			return errors.New("OBS configuration is incomplete")
+		}
+		client, err := obs.New(config.OBS.AccessKeyID, config.OBS.SecretAccessKey, normalizeOBSEndpoint(config.OBS.Endpoint, config.OBS.Bucket))
+		if err != nil {
+			return fmt.Errorf("create OBS client: %w", err)
+		}
+		defer client.Close()
+		if _, err := client.DeleteObject(&obs.DeleteObjectInput{Bucket: config.OBS.Bucket, Key: key}); err != nil {
+			return fmt.Errorf("delete OBS object: %w", err)
+		}
+		return nil
+	}
+	localPath := filepath.Join(localUploadRoot(), filepath.FromSlash(key))
+	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func normalizeOBSEndpoint(raw, bucket string) string {
-	parsed, err := url.Parse(raw)
+	endpoint := strings.TrimSpace(raw)
+	if endpoint == "" {
+		return endpoint
+	}
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "https://" + endpoint
+	}
+	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" {
-		return raw
+		return strings.TrimRight(endpoint, "/")
 	}
 	parsed.Host = strings.TrimPrefix(parsed.Host, bucket+".")
 	return strings.TrimRight(parsed.String(), "/")
+}
+
+func obsObjectURL(config OBSConfig, key string) string {
+	endpoint := normalizeOBSEndpoint(config.Endpoint, config.Bucket)
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" {
+		return strings.TrimRight(config.Endpoint, "/") + "/" + key
+	}
+	if config.Bucket != "" && !strings.HasPrefix(parsed.Host, config.Bucket+".") {
+		parsed.Host = config.Bucket + "." + parsed.Host
+	}
+	parsed.Path = "/" + strings.TrimLeft(key, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func localUploadRoot() string {
@@ -163,6 +230,12 @@ func safeFileName(name string) string {
 	if base == "" || base == "." {
 		return "scan-file"
 	}
+	extension := strings.ToLower(filepath.Ext(base))
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
 	replacer := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-	return strings.Trim(replacer.ReplaceAllString(base, "-"), ".-")
+	safeStem := strings.Trim(replacer.ReplaceAllString(stem, "-"), ".-")
+	if safeStem == "" {
+		safeStem = "scan-file"
+	}
+	return safeStem + extension
 }

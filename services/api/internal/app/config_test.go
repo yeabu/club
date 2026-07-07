@@ -12,7 +12,8 @@ func TestLoadConfigFromYAMLAndEnvironmentOverride(t *testing.T) {
 		"REDIS_ADDR", "REDIS_PASSWORD", "REDIS_DB", "STORAGE_DRIVER", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY",
 		"MINIO_SECRET_KEY", "MINIO_BUCKET", "MINIO_USE_SSL", "OBS_ENDPOINT", "OBS_ACCESS_KEY_ID",
 		"OBS_SECRET_ACCESS_KEY", "OBS_BUCKET", "OBS_REGION", "AI_PROVIDER_NAME", "AI_PROVIDER_BASE_URL",
-		"AI_PROVIDER_API_KEY", "AI_PROVIDER_TIMEOUT_SECONDS", "AI_PROVIDER_CALLBACK_SECRET",
+		"AI_PROVIDER_API_KEY", "AI_PROVIDER_MODEL", "AI_PROVIDER_TIMEOUT_SECONDS", "AI_PROVIDER_CALLBACK_SECRET",
+		"AI_PROVIDER", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "AI_TIMEOUT_SECONDS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -52,6 +53,7 @@ aiProvider:
   name: generic-http
   baseUrl: https://ai-provider.example.com/tasks
   apiKey: ai-secret
+  model: provider-model
   timeoutSeconds: 20
   callbackSecret: callback-secret
 `)
@@ -84,7 +86,7 @@ aiProvider:
 	if cfg.StorageDriver != "obs" || cfg.OBS.Bucket != "reports" || !cfg.MinIO.UseSSL {
 		t.Fatalf("unexpected storage config: %+v", cfg)
 	}
-	if cfg.AIProvider.Name != "generic-http" || cfg.AIProvider.BaseURL != "https://ai-provider.example.com/tasks" || cfg.AIProvider.APIKey != "ai-secret" || cfg.AIProvider.TimeoutSeconds != 45 {
+	if cfg.AIProvider.Name != "generic-http" || cfg.AIProvider.BaseURL != "https://ai-provider.example.com/tasks" || cfg.AIProvider.APIKey != "ai-secret" || cfg.AIProvider.Model != "provider-model" || cfg.AIProvider.TimeoutSeconds != 45 {
 		t.Fatalf("unexpected ai provider config: %+v", cfg.AIProvider)
 	}
 }
@@ -124,6 +126,31 @@ func TestConfigPublicRedactsSecrets(t *testing.T) {
 	}
 	if aiProvider["apiKeyProvided"] != true || aiProvider["callbackSecretProvided"] != true {
 		t.Fatal("ai provider secret presence should be exposed as booleans")
+	}
+}
+
+func TestLoadConfigNormalizesLegacyDeepSeekAnthropicConfig(t *testing.T) {
+	t.Setenv("AI_PROVIDER_NAME", "")
+	t.Setenv("AI_PROVIDER_BASE_URL", "")
+	t.Setenv("AI_PROVIDER_API_KEY", "")
+	t.Setenv("AI_PROVIDER_MODEL", "")
+	t.Setenv("AI_PROVIDER", "anthropic")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "secret")
+	t.Setenv("ANTHROPIC_MODEL", "deepseek-v4-pro")
+
+	cfg := LoadConfig()
+	if cfg.AIProvider.Name != "deepseek" {
+		t.Fatalf("expected normalized provider name, got %s", cfg.AIProvider.Name)
+	}
+	if cfg.AIProvider.BaseURL != "https://api.deepseek.com/v1" {
+		t.Fatalf("expected normalized base url, got %s", cfg.AIProvider.BaseURL)
+	}
+	if cfg.AIProvider.Model != "deepseek-chat" {
+		t.Fatalf("expected normalized model, got %s", cfg.AIProvider.Model)
+	}
+	if cfg.AIProvider.APIKey != "secret" {
+		t.Fatal("expected legacy anthropic token to be reused as provider api key")
 	}
 }
 
